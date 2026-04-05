@@ -1,0 +1,61 @@
+apiVersion: argoproj.io/v1alpha1
+kind: WorkflowTemplate
+metadata:
+  name: fleetos-locomotion-training
+spec:
+  entrypoint: train-and-eval
+  arguments:
+    parameters:
+      - name: job-id
+        value: "locomotion-default"
+      - name: timesteps
+        value: "2000000"
+
+  templates:
+    - name: train-and-eval
+      dag:
+        tasks:
+          - name: train
+            template: train
+          - name: evaluate
+            template: evaluate
+            dependencies: [train]
+
+    - name: train
+      container:
+        image: fleetos/training:latest
+        imagePullPolicy: Never
+        command: [python, train_locomotion.py]
+        args:
+          - "--job-id={{workflow.parameters.job-id}}"
+          - "--timesteps={{workflow.parameters.timesteps}}"
+          - "--output-dir=/tmp/output"
+        envFrom:
+          - secretRef:
+              name: fleetos-training
+        resources:
+          requests:
+            cpu: "2"
+            memory: 3Gi
+          limits:
+            cpu: "4"
+            memory: 6Gi
+
+    - name: evaluate
+      container:
+        image: fleetos/training:latest
+        imagePullPolicy: Never
+        command: [python, evaluate_policy.py]
+        args:
+          - "--model-path=/tmp/output/policy.zip"
+          - "--output-dir=/tmp/eval"
+        envFrom:
+          - secretRef:
+              name: fleetos-training
+        resources:
+          requests:
+            cpu: "1"
+            memory: 2Gi
+          limits:
+            cpu: "2"
+            memory: 3Gi

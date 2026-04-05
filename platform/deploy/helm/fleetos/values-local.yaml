@@ -1,0 +1,218 @@
+# values-local.yaml — Overrides for local kind cluster.
+# Everything runs in K8s. No Docker Compose. No host.docker.internal.
+
+global:
+  environment: local
+  imagePullPolicy: IfNotPresent  # Platform images pre-loaded via kind load; infra charts pull their own
+
+# --- Secrets ---
+secrets:
+  postgresql:
+    password: fleetos-dev
+  minio:
+    rootPassword: fleetos123
+  jwt:
+    secret: dev-secret-change-me
+
+# --- Infrastructure (Bitnami subcharts — minimal resources) ---
+postgresql:
+  enabled: true
+  auth:
+    username: fleetos
+    password: fleetos-dev
+    database: fleetos
+  primary:
+    persistence:
+      size: 256Mi
+    initdb:
+      scriptsConfigMap: fleetos-initdb
+    resources:
+      requests:
+        cpu: 50m
+        memory: 128Mi
+      limits:
+        cpu: 250m
+        memory: 256Mi
+  readReplicas:
+    replicaCount: 0
+
+redis:
+  enabled: true
+  architecture: standalone
+  auth:
+    enabled: false
+  sentinel:
+    enabled: false
+  master:
+    persistence:
+      size: 128Mi
+    resources:
+      requests:
+        cpu: 25m
+        memory: 32Mi
+      limits:
+        cpu: 100m
+        memory: 64Mi
+
+kafka:
+  enabled: true
+  controller:
+    replicaCount: 1
+  broker:
+    replicaCount: 0
+  listeners:
+    client:
+      protocol: PLAINTEXT
+    interbroker:
+      protocol: PLAINTEXT
+    controller:
+      protocol: PLAINTEXT
+  persistence:
+    size: 256Mi
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi
+
+minio:
+  enabled: true
+  auth:
+    rootUser: fleetos
+    rootPassword: fleetos123
+  defaultBuckets: "fleetos-telemetry,fleetos-models,fleetos-training-data"
+  persistence:
+    size: 256Mi
+  resources:
+    requests:
+      cpu: 25m
+      memory: 64Mi
+    limits:
+      cpu: 250m
+      memory: 128Mi
+
+temporal:
+  enabled: true
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi
+
+# --- Platform services (1 replica, NodePort for dev access) ---
+ingestion:
+  replicaCount: 1
+  autoscaling:
+    enabled: false
+  service:
+    type: NodePort
+    port: 50051
+    nodePort: 30051
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      cpu: 500m
+      memory: 256Mi
+
+api:
+  replicaCount: 1
+  autoscaling:
+    enabled: false
+  ingress:
+    enabled: false
+  service:
+    type: NodePort
+    port: 8080
+    nodePort: 30880
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi
+
+processor:
+  replicaCount: 1
+  autoscaling:
+    enabled: false
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      cpu: 500m
+      memory: 256Mi
+
+worker:
+  replicaCount: 1
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      cpu: 500m
+      memory: 256Mi
+
+inference:
+  replicaCount: 1
+  autoscaling:
+    enabled: false
+  service:
+    type: NodePort
+    port: 8081
+    nodePort: 30081
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      cpu: 500m
+      memory: 1Gi
+
+# --- Playground ---
+simulator:
+  enabled: true
+  replicaCount: 1
+  service:
+    type: NodePort
+    port: 8085
+    nodePort: 30085
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      cpu: 500m
+      memory: 256Mi
+
+web:
+  enabled: true
+  replicaCount: 1
+  service:
+    type: NodePort
+    port: 5173
+    nodePort: 30173
+  resources:
+    requests:
+      cpu: 50m
+      memory: 64Mi
+    limits:
+      cpu: 250m
+      memory: 128Mi
+
+# --- Disable production-only features ---
+istio:
+  enabled: false
+kubeflow:
+  enabled: false
+prometheus:
+  enabled: false
+grafana:
+  enabled: false

@@ -1,0 +1,29 @@
+# ArgoCD AppProject scopes what the FleetOS applications can access.
+apiVersion: argoproj.io/v1alpha1
+kind: AppProject
+metadata:
+  name: fleetos
+  namespace: argocd
+spec:
+  description: FleetOS Robot Fleet Management Platform
+  # Source repos allowed for this project
+  sourceRepos:
+    - '*'
+  # Destination clusters and namespaces
+  destinations:
+    - namespace: fleetos
+      server: https://kubernetes.default.svc
+    - namespace: argo
+      server: https://kubernetes.default.svc
+  # Cluster resource allow list
+  clusterResourceWhitelist:
+    - group: ''
+      kind: Namespace
+    - group: 'rbac.authorization.k8s.io'
+      kind: ClusterRole
+    - group: 'rbac.authorization.k8s.io'
+      kind: ClusterRoleBinding
+  # Namespace resource allow list (allow all within project namespaces)
+  namespaceResourceWhitelist:
+    - group: '*'
+      kind: '*'

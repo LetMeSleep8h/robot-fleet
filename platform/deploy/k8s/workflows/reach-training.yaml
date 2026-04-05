@@ -1,0 +1,103 @@
+apiVersion: argoproj.io/v1alpha1
+kind: WorkflowTemplate
+metadata:
+  name: fleetos-reach-training
+spec:
+  entrypoint: train-and-eval
+  arguments:
+    parameters:
+      - name: job-id
+        value: "reach-default"
+      - name: timesteps
+        value: "500000"
+      - name: learning-rate
+        value: "0.0003"
+      - name: buffer-size
+        value: "1000000"
+      - name: batch-size
+        value: "256"
+
+  templates:
+    - name: train-and-eval
+      dag:
+        tasks:
+          - name: train
+            template: train
+          - name: evaluate
+            template: evaluate
+            dependencies: [train]
+
+    - name: train
+      container:
+        image: fleetos/training:latest
+        imagePullPolicy: Never
+        command: [python, train_reach.py]
+        args:
+          - "--job-id={{workflow.parameters.job-id}}"
+          - "--timesteps={{workflow.parameters.timesteps}}"
+          - "--learning-rate={{workflow.parameters.learning-rate}}"
+          - "--buffer-size={{workflow.parameters.buffer-size}}"
+          - "--batch-size={{workflow.parameters.batch-size}}"
+          - "--output-dir=/tmp/output"
+        envFrom:
+          - secretRef:
+              name: fleetos-training
+        resources:
+          requests:
+            cpu: "2"
+            memory: 3Gi
+          limits:
+            cpu: "4"
+            memory: 4Gi
+
+    - name: evaluate
+      script:
+        image: fleetos/training:latest
+        imagePullPolicy: Never
+        command: [python]
+        workingDir: /app
+        source: |
+          import os, sys
+          sys.path.insert(0, "/app")
+          from minio import Minio
+          job_id = "{{workflow.parameters.job-id}}"
+          client = Minio(
+              os.environ["S3_ENDPOINT"],
+              access_key=os.environ["S3_ACCESS_KEY"],
+              secret_key=os.environ["S3_SECRET_KEY"],
+              secure=False,
+          )
+          # Download trained model from S3
+          os.makedirs("/tmp/eval_model", exist_ok=True)
+          client.fget_object(
+              os.environ["S3_BUCKET"],
+              f"training/{job_id}/policy.zip",
+              "/tmp/eval_model/policy.zip",
+          )
+          print(f"[eval] Downloaded model for {job_id}")
+          # Run evaluation
+          sys.argv = [
+              "evaluate_reach.py",
+              "--model-path", "/tmp/eval_model/policy",
+              "--episodes", "20",
+              "--output-dir", "/tmp/eval",
+          ]
+          exec(open("evaluate_reach.py").read())
+          # Upload results
+          for f in os.listdir("/tmp/eval"):
+              client.fput_object(
+                  os.environ["S3_BUCKET"],
+                  f"training/{job_id}/eval_{f}",
+                  f"/tmp/eval/{f}",
+              )
+              print(f"[eval] Uploaded eval_{f}")
+        envFrom:
+          - secretRef:
+              name: fleetos-training
+        resources:
+          requests:
+            cpu: "1"
+            memory: 2Gi
+          limits:
+            cpu: "2"
+            memory: 3Gi

@@ -1,0 +1,45 @@
+# ArgoCD Application for local kind cluster.
+# Syncs the Helm chart from the host repo mounted into the kind node.
+# The repo is mounted at /repo/robot-fleet via kind extraMounts,
+# then into argocd-repo-server via repo-server-patch.yaml.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: fleetos-platform
+  namespace: argocd
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: fleetos
+  source:
+    # file:// URL points to the host repo mounted into argocd-repo-server
+    # via repo-server-patch.yaml (kind extraMount → hostPath volume).
+    repoURL: file:///tmp/https___localhost_robot-fleet.git
+    targetRevision: HEAD
+    path: platform/deploy/helm/fleetos
+    helm:
+      valueFiles:
+        - values.yaml
+        - values-local.yaml
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: fleetos
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+      - PrunePropagationPolicy=foreground
+      - ServerSideApply=true
+    retry:
+      limit: 5
+      backoff:
+        duration: 10s
+        factor: 2
+        maxDuration: 5m0s
+  ignoreDifferences:
+    - group: autoscaling
+      kind: HorizontalPodAutoscaler
+      jsonPointers:
+        - /spec/metrics

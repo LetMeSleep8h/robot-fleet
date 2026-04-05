@@ -1,0 +1,40 @@
+# kind cluster for FleetOS — full stack in K8s.
+# Single control-plane node with host repo mounted for ArgoCD.
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+nodes:
+  - role: control-plane
+    extraMounts:
+      # Mount host repo into kind node so ArgoCD repo-server can access it
+      - hostPath: REPO_ROOT_PLACEHOLDER
+        containerPath: /repo/robot-fleet
+        readOnly: true
+    extraPortMappings:
+      # ArgoCD UI (NodePort 30080 inside Kind)
+      - containerPort: 30080
+        hostPort: 30080
+        protocol: TCP
+      # Argo Workflows UI
+      - containerPort: 2746
+        hostPort: 32746
+        protocol: TCP
+      # FleetOS API
+      - containerPort: 30880
+        hostPort: 30880
+        protocol: TCP
+      # FleetOS Ingestion (gRPC)
+      - containerPort: 30051
+        hostPort: 30051
+        protocol: TCP
+      # FleetOS Inference
+      - containerPort: 30081
+        hostPort: 30081
+        protocol: TCP
+      # Playground Simulator
+      - containerPort: 30085
+        hostPort: 30085
+        protocol: TCP
+      # Playground Web UI
+      - containerPort: 30173
+        hostPort: 30173
+        protocol: TCP

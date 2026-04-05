@@ -1,0 +1,23 @@
+# Patch argocd-repo-server to mount the host repo from the kind node.
+# The repo is available at /repo/robot-fleet inside the kind node
+# (via kind extraMounts), and this patch makes it available inside
+# the argocd-repo-server pod.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: argocd-repo-server
+  namespace: argocd
+spec:
+  template:
+    spec:
+      containers:
+        - name: argocd-repo-server
+          volumeMounts:
+            - name: host-repo
+              mountPath: /tmp/https___localhost_robot-fleet.git
+              readOnly: true
+      volumes:
+        - name: host-repo
+          hostPath:
+            path: /repo/robot-fleet
+            type: Directory
