@@ -9,3 +9,21 @@ keywords:
   - fleet-management
   - telemetry
   - ai-inference
+
+dependencies:
+  - name: postgresql
+    version: "~16.4"
+    repository: oci://registry-1.docker.io/bitnamicharts
+    condition: postgresql.enabled
+  - name: redis
+    version: "~20.6"
+    repository: oci://registry-1.docker.io/bitnamicharts
+    condition: redis.enabled
+  - name: kafka
+    version: "~31.2"
+    repository: oci://registry-1.docker.io/bitnamicharts
+    condition: kafka.enabled
+  - name: minio
+    version: "~14.8"
+    repository: oci://registry-1.docker.io/bitnamicharts
+    condition: minio.enabled

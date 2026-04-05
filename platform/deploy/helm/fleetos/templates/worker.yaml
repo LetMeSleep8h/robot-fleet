@@ -1,0 +1,79 @@
+{{- if .Values.temporal.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Release.Name }}-worker
+  labels:
+    app: fleetos-worker
+    app.kubernetes.io/name: worker
+    app.kubernetes.io/instance: {{ .Release.Name }}
+spec:
+  replicas: {{ .Values.worker.replicaCount }}
+  selector:
+    matchLabels:
+      app: fleetos-worker
+  template:
+    metadata:
+      labels:
+        app: fleetos-worker
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 100
+        fsGroup: 65534
+      containers:
+        - name: worker
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+          image: "{{ .Values.worker.image.repository }}:{{ .Values.worker.image.tag }}"
+          imagePullPolicy: {{ .Values.global.imagePullPolicy }}
+          env:
+            - name: TEMPORAL_HOST_PORT
+              value: "{{ .Release.Name }}-temporal:7233"
+            - name: TEMPORAL_ENABLED
+              value: "true"
+            - name: TEMPORAL_NAMESPACE
+              value: "default"
+            - name: POSTGRES_DSN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Release.Name }}-db-secret
+                  key: dsn
+            - name: REDIS_ADDR
+              value: "{{ .Release.Name }}-redis-master:6379"
+            - name: KAFKA_BROKERS
+              value: "{{ .Release.Name }}-kafka:9092"
+            - name: KAFKA_COMMAND_DISPATCH_TOPIC
+              value: "robot.commands.dispatch"
+            - name: KAFKA_COMMAND_ACKS_TOPIC
+              value: "robot.command-acks"
+            - name: KAFKA_DEPLOYMENT_EVENT_TOPIC
+              value: "deployment.events"
+            - name: INFERENCE_ENDPOINT
+              value: "{{ .Release.Name }}-inference:{{ .Values.inference.service.port }}"
+            - name: S3_ENDPOINT
+              value: "{{ .Release.Name }}-minio:9000"
+            - name: S3_BUCKET
+              value: "fleetos-models"
+            - name: S3_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Release.Name }}-s3-secret
+                  key: access-key
+            - name: S3_SECRET_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Release.Name }}-s3-secret
+                  key: secret-key
+            - name: ENVIRONMENT
+              value: {{ .Values.global.environment }}
+          resources:
+            {{- toYaml .Values.worker.resources | nindent 12 }}
+          livenessProbe:
+            exec:
+              command: ["sh", "-c", "pgrep -f worker || exit 1"]
+            initialDelaySeconds: 15
+            periodSeconds: 10
+            failureThreshold: 3
+{{- end }}

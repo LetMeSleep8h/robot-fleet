@@ -1,0 +1,13 @@
+{{- if .Values.postgresql.enabled }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ .Release.Name }}-initdb
+  labels:
+    app.kubernetes.io/instance: {{ .Release.Name }}
+data:
+  {{- range $path, $_ := .Files.Glob "files/migrations/*.sql" }}
+  {{ base $path }}: |
+    {{- $.Files.Get $path | nindent 4 }}
+  {{- end }}
+{{- end }}

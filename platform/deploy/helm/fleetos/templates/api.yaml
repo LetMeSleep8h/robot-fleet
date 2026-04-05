@@ -40,6 +40,7 @@ spec:
                 topologyKey: kubernetes.io/hostname
       securityContext:
         runAsNonRoot: true
+        runAsUser: 100
         fsGroup: 65534
       containers:
         - name: api
@@ -68,6 +69,44 @@ spec:
                 secretKeyRef:
                   name: {{ .Release.Name }}-auth-secret
                   key: jwt-secret
+            - name: KAFKA_COMMAND_TOPIC
+              value: "robot.commands"
+            - name: KAFKA_COMMAND_DISPATCH_TOPIC
+              value: "robot.commands.dispatch"
+            - name: KAFKA_COMMAND_ACKS_TOPIC
+              value: "robot.command-acks"
+            - name: KAFKA_DEPLOYMENT_EVENT_TOPIC
+              value: "deployment.events"
+            - name: INFERENCE_ENDPOINT
+              value: "{{ .Release.Name }}-inference:{{ .Values.inference.service.port }}"
+            - name: TEMPORAL_HOST_PORT
+              value: "{{ .Release.Name }}-temporal:7233"
+            - name: TEMPORAL_ENABLED
+              value: "{{ .Values.temporal.enabled }}"
+            - name: TEMPORAL_NAMESPACE
+              value: "default"
+            - name: S3_ENDPOINT
+              value: "{{ .Release.Name }}-minio:9000"
+            - name: S3_BUCKET
+              value: "fleetos-models"
+            - name: S3_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Release.Name }}-s3-secret
+                  key: access-key
+            - name: S3_SECRET_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Release.Name }}-s3-secret
+                  key: secret-key
+            - name: TRAINING_ENABLED
+              value: "false"
+            - name: TRAINING_IMAGE
+              value: "fleetos/training:latest"
+            - name: TRAINING_NAMESPACE
+              value: "{{ .Release.Namespace }}"
+            - name: TRAINING_CALLBACK_URL
+              value: "http://{{ .Release.Name }}-api:{{ .Values.api.service.port }}/api/v1/internal"
             - name: RATE_LIMIT_RPS
               value: "100"
             - name: ENVIRONMENT
@@ -97,6 +136,9 @@ spec:
     - port: {{ .Values.api.service.port }}
       targetPort: http
       name: http
+      {{- if .Values.api.service.nodePort }}
+      nodePort: {{ .Values.api.service.nodePort }}
+      {{- end }}
   selector:
     app: fleetos-api
 {{- if .Values.api.autoscaling.enabled }}

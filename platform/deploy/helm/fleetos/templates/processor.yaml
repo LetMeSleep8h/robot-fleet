@@ -1,0 +1,128 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Release.Name }}-processor
+  labels:
+    app: fleetos-processor
+    app.kubernetes.io/name: processor
+    app.kubernetes.io/instance: {{ .Release.Name }}
+spec:
+  replicas: {{ .Values.processor.replicaCount }}
+  selector:
+    matchLabels:
+      app: fleetos-processor
+  template:
+    metadata:
+      labels:
+        app: fleetos-processor
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "9090"
+    spec:
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: topology.kubernetes.io/zone
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              app: fleetos-processor
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 100
+        fsGroup: 65534
+      containers:
+        - name: processor
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+          image: "{{ .Values.processor.image.repository }}:{{ .Values.processor.image.tag }}"
+          imagePullPolicy: {{ .Values.global.imagePullPolicy }}
+          ports:
+            - containerPort: 9090
+              name: metrics
+          env:
+            - name: KAFKA_BROKERS
+              value: "{{ .Release.Name }}-kafka:9092"
+            - name: KAFKA_TELEMETRY_TOPIC
+              value: "robot.telemetry"
+            - name: KAFKA_COMMAND_TOPIC
+              value: "robot.commands"
+            - name: KAFKA_GROUP_ID
+              value: "fleetos-processor"
+            - name: POSTGRES_DSN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Release.Name }}-db-secret
+                  key: dsn
+            - name: REDIS_ADDR
+              value: "{{ .Release.Name }}-redis-master:6379"
+            - name: S3_ENDPOINT
+              value: "{{ .Release.Name }}-minio:9000"
+            - name: S3_BUCKET
+              value: "fleetos-telemetry"
+            - name: S3_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Release.Name }}-s3-secret
+                  key: access-key
+            - name: S3_SECRET_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Release.Name }}-s3-secret
+                  key: secret-key
+            - name: TEMPORAL_ENABLED
+              value: "{{ .Values.temporal.enabled }}"
+            - name: TEMPORAL_HOST_PORT
+              value: "{{ .Release.Name }}-temporal:7233"
+            - name: TEMPORAL_NAMESPACE
+              value: "default"
+            - name: ENVIRONMENT
+              value: {{ .Values.global.environment }}
+          resources:
+            {{- toYaml .Values.processor.resources | nindent 12 }}
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: metrics
+            initialDelaySeconds: 15
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: metrics
+            initialDelaySeconds: 10
+            periodSeconds: 5
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ .Release.Name }}-processor
+spec:
+  type: ClusterIP
+  ports:
+    - port: 9090
+      targetPort: metrics
+      name: metrics
+  selector:
+    app: fleetos-processor
+{{- if .Values.processor.autoscaling.enabled }}
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: {{ .Release.Name }}-processor
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: {{ .Release.Name }}-processor
+  minReplicas: {{ .Values.processor.autoscaling.minReplicas }}
+  maxReplicas: {{ .Values.processor.autoscaling.maxReplicas }}
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: {{ .Values.processor.autoscaling.targetCPUUtilizationPercentage }}
+{{- end }}

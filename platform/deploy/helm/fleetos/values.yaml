@@ -3,6 +3,15 @@ global:
   imageRegistry: ""
   imagePullPolicy: IfNotPresent
 
+# --- Centralized secrets (override in values-local.yaml or sealed-secrets) ---
+secrets:
+  postgresql:
+    password: fleetos-dev
+  minio:
+    rootPassword: fleetos123
+  jwt:
+    secret: dev-secret-change-me
+
 # --- Ingestion Service ---
 ingestion:
   replicaCount: 2
@@ -52,6 +61,61 @@ api:
     host: api.fleetos.dev
     tls: true
 
+# --- Processor Service ---
+processor:
+  replicaCount: 2
+  image:
+    repository: fleetos/processor
+    tag: latest
+  resources:
+    requests:
+      cpu: 250m
+      memory: 256Mi
+    limits:
+      cpu: "1"
+      memory: 512Mi
+  autoscaling:
+    enabled: true
+    minReplicas: 2
+    maxReplicas: 8
+    targetCPUUtilizationPercentage: 70
+
+# --- Worker Service (Temporal) ---
+worker:
+  replicaCount: 2
+  image:
+    repository: fleetos/worker
+    tag: latest
+  resources:
+    requests:
+      cpu: 250m
+      memory: 256Mi
+    limits:
+      cpu: "1"
+      memory: 512Mi
+
+# --- Inference Service ---
+inference:
+  replicaCount: 1
+  image:
+    repository: fleetos/inference
+    tag: latest
+  resources:
+    requests:
+      cpu: 500m
+      memory: 512Mi
+    limits:
+      cpu: "2"
+      memory: 2Gi
+  service:
+    type: ClusterIP
+    port: 8081
+  autoscaling:
+    enabled: true
+    minReplicas: 1
+    maxReplicas: 5
+    targetCPUUtilizationPercentage: 70
+
 # --- Simulator ---
 simulator:
   enabled: true
@@ -68,31 +132,60 @@ simulator:
     limits:
       cpu: 500m
       memory: 256Mi
+  service:
+    type: ClusterIP
+    port: 8085
 
-# --- Kafka ---
-kafka:
-  replicaCount: 3
-  persistence:
-    size: 50Gi
+# --- Web Dashboard ---
+web:
+  enabled: true
+  replicaCount: 1
+  image:
+    repository: fleetos/web
+    tag: latest
   resources:
     requests:
-      cpu: 500m
-      memory: 1Gi
+      cpu: 50m
+      memory: 64Mi
+    limits:
+      cpu: 250m
+      memory: 128Mi
+  service:
+    type: ClusterIP
+    port: 5173
 
-# --- PostgreSQL ---
+# --- Temporal ---
+temporal:
+  enabled: true
+  image:
+    repository: temporalio/auto-setup
+    tag: "1.25"
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi
+
+# --- PostgreSQL (Bitnami subchart) ---
 postgresql:
+  enabled: true
   auth:
     username: fleetos
-    password: fleetos
+    password: fleetos-dev
     database: fleetos
   primary:
     persistence:
       size: 20Gi
+    initdb:
+      scriptsConfigMap: "{{ .Release.Name }}-initdb"
   readReplicas:
     replicaCount: 2
 
-# --- Redis ---
+# --- Redis (Bitnami subchart) ---
 redis:
+  enabled: true
   architecture: replication
   auth:
     enabled: false
@@ -101,6 +194,31 @@ redis:
   master:
     persistence:
       size: 5Gi
+
+# --- Kafka (Bitnami subchart — KRaft mode, no ZooKeeper) ---
+kafka:
+  enabled: true
+  controller:
+    replicaCount: 3
+  listeners:
+    client:
+      protocol: PLAINTEXT
+    interbroker:
+      protocol: PLAINTEXT
+    controller:
+      protocol: PLAINTEXT
+  persistence:
+    size: 50Gi
+
+# --- MinIO (Bitnami subchart) ---
+minio:
+  enabled: true
+  auth:
+    rootUser: fleetos
+    rootPassword: fleetos123
+  defaultBuckets: "fleetos-telemetry,fleetos-models,fleetos-training-data"
+  persistence:
+    size: 100Gi
 
 # --- Observability ---
 prometheus:
@@ -117,16 +235,6 @@ grafana:
     enabled: true
     size: 5Gi
 
-# --- Inference Service (GPU) ---
-inference:
-  replicaCount: 1
-  image:
-    repository: fleetos/inference
-    tag: latest
-  autoscaling:
-    minReplicas: 1
-    maxReplicas: 5
-
 # --- Istio Service Mesh ---
 istio:
   enabled: true
@@ -134,7 +242,7 @@ istio:
     mode: STRICT
   virtualService:
     canary:
-      weight: 0  # 0-100 for canary traffic splitting
+      weight: 0
 
 # --- Kubeflow (MLOps) ---
 kubeflow:
@@ -177,13 +285,3 @@ kubeflow:
       nEpochs:
         min: "5"
         max: "15"
-
-# --- MinIO (S3-compatible) ---
-minio:
-  enabled: true
-  persistence:
-    size: 100Gi
-  buckets:
-    - name: fleetos-telemetry
-    - name: fleetos-models
-    - name: fleetos-training-data

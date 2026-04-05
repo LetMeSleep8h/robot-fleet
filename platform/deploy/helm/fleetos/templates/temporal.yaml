@@ -1,0 +1,74 @@
+{{- if .Values.temporal.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Release.Name }}-temporal
+  labels:
+    app: fleetos-temporal
+    app.kubernetes.io/name: temporal
+    app.kubernetes.io/instance: {{ .Release.Name }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: fleetos-temporal
+  template:
+    metadata:
+      labels:
+        app: fleetos-temporal
+    spec:
+      securityContext:
+        fsGroup: 65534
+      initContainers:
+        - name: wait-postgres
+          image: busybox:1.36
+          command: ['sh', '-c', 'until nc -z {{ .Release.Name }}-postgresql 5432; do echo waiting for postgres; sleep 2; done']
+      containers:
+        - name: temporal
+          securityContext:
+            allowPrivilegeEscalation: false
+          image: "{{ .Values.temporal.image.repository }}:{{ .Values.temporal.image.tag }}"
+          imagePullPolicy: {{ .Values.global.imagePullPolicy }}
+          ports:
+            - containerPort: 7233
+              name: grpc
+          env:
+            - name: DB
+              value: postgres12
+            - name: DB_PORT
+              value: "5432"
+            - name: POSTGRES_USER
+              value: {{ .Values.postgresql.auth.username }}
+            - name: POSTGRES_PWD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Release.Name }}-db-secret
+                  key: password
+            - name: POSTGRES_SEEDS
+              value: "{{ .Release.Name }}-postgresql"
+          resources:
+            {{- toYaml .Values.temporal.resources | nindent 12 }}
+          livenessProbe:
+            tcpSocket:
+              port: grpc
+            initialDelaySeconds: 60
+            periodSeconds: 15
+          readinessProbe:
+            tcpSocket:
+              port: grpc
+            initialDelaySeconds: 30
+            periodSeconds: 10
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ .Release.Name }}-temporal
+spec:
+  type: ClusterIP
+  ports:
+    - port: 7233
+      targetPort: grpc
+      name: grpc
+  selector:
+    app: fleetos-temporal
+{{- end }}

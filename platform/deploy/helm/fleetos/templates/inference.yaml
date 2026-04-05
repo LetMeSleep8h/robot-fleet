@@ -1,0 +1,116 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Release.Name }}-inference
+  labels:
+    app: fleetos-inference
+    app.kubernetes.io/name: inference
+    app.kubernetes.io/instance: {{ .Release.Name }}
+spec:
+  replicas: {{ .Values.inference.replicaCount }}
+  selector:
+    matchLabels:
+      app: fleetos-inference
+  template:
+    metadata:
+      labels:
+        app: fleetos-inference
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8081"
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 999
+        fsGroup: 65534
+      containers:
+        - name: inference
+          securityContext:
+            allowPrivilegeEscalation: false
+          image: "{{ .Values.inference.image.repository }}:{{ .Values.inference.image.tag }}"
+          imagePullPolicy: {{ .Values.global.imagePullPolicy }}
+          ports:
+            - containerPort: 8081
+              name: http
+          env:
+            - name: INFERENCE_PORT
+              value: "8081"
+            - name: PLATFORM_API_URL
+              value: "http://{{ .Release.Name }}-api:{{ .Values.api.service.port }}"
+            - name: S3_ENDPOINT
+              value: "{{ .Release.Name }}-minio:9000"
+            - name: S3_BUCKET
+              value: "fleetos-models"
+            - name: S3_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Release.Name }}-s3-secret
+                  key: access-key
+            - name: S3_SECRET_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Release.Name }}-s3-secret
+                  key: secret-key
+            - name: REDIS_ADDR
+              value: "{{ .Release.Name }}-redis-master:6379"
+            - name: ENVIRONMENT
+              value: {{ .Values.global.environment }}
+          resources:
+            {{- toYaml .Values.inference.resources | nindent 12 }}
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 30
+            periodSeconds: 15
+            failureThreshold: 5
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          startupProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 5
+            failureThreshold: 30
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ .Release.Name }}-inference
+spec:
+  type: {{ .Values.inference.service.type | default "ClusterIP" }}
+  ports:
+    - port: {{ .Values.inference.service.port | default 8081 }}
+      targetPort: http
+      name: http
+      {{- if .Values.inference.service.nodePort }}
+      nodePort: {{ .Values.inference.service.nodePort }}
+      {{- end }}
+  selector:
+    app: fleetos-inference
+{{- if .Values.inference.autoscaling.enabled }}
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: {{ .Release.Name }}-inference
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: {{ .Release.Name }}-inference
+  minReplicas: {{ .Values.inference.autoscaling.minReplicas }}
+  maxReplicas: {{ .Values.inference.autoscaling.maxReplicas }}
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: {{ .Values.inference.autoscaling.targetCPUUtilizationPercentage | default 70 }}
+{{- end }}

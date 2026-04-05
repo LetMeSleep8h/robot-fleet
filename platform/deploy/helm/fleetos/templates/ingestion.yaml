@@ -40,6 +40,7 @@ spec:
                 topologyKey: kubernetes.io/hostname
       securityContext:
         runAsNonRoot: true
+        runAsUser: 100
         fsGroup: 65534
       containers:
         - name: ingestion
@@ -60,6 +61,8 @@ spec:
               value: "{{ .Release.Name }}-kafka:9092"
             - name: KAFKA_TELEMETRY_TOPIC
               value: "robot.telemetry"
+            - name: REDIS_ADDR
+              value: "{{ .Release.Name }}-redis-master:6379"
             - name: ENVIRONMENT
               value: {{ .Values.global.environment }}
           resources:
@@ -85,6 +88,9 @@ spec:
     - port: {{ .Values.ingestion.service.port }}
       targetPort: grpc
       name: grpc
+      {{- if .Values.ingestion.service.nodePort }}
+      nodePort: {{ .Values.ingestion.service.nodePort }}
+      {{- end }}
   selector:
     app: fleetos-ingestion
 {{- if .Values.ingestion.autoscaling.enabled }}
