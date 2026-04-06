@@ -133,9 +133,15 @@ load_images() {
         warn "  $train_img not found (build with: make k8s-training-image)"
     fi
 
-    # External images: only non-Bitnami images that need pre-loading.
-    # Bitnami subchart images use imagePullPolicy: IfNotPresent and pull from within the kind node.
+    # External images that need pre-loading into kind.
+    # Bitnami subcharts use :latest (specific version tags removed from Docker Hub).
+    # Kafka/MinIO use standalone (non-Bitnami) images.
     local external_images=(
+        "docker.io/bitnami/postgresql:latest"
+        "docker.io/bitnami/redis:latest"
+        "confluentinc/cp-kafka:7.6.0"
+        "confluentinc/cp-zookeeper:7.6.0"
+        "minio/minio:latest"
         "temporalio/auto-setup:1.25"
         "busybox:1.36"
     )
