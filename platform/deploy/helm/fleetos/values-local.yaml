@@ -182,10 +182,10 @@ simulator:
 web:
   enabled: true
   replicaCount: 1
-  # Browser-accessible URLs (NodePort on localhost, not in-cluster DNS)
-  apiUrl: "http://localhost:30880"
-  wsUrl: "ws://localhost:30880"
-  simUrl: "http://localhost:30085"
+  # Vite dev server proxy targets (in-cluster DNS, used server-side by Vite)
+  apiUrl: "http://fleetos-platform-api:8080"
+  wsUrl: "ws://fleetos-platform-api:8080"
+  simUrl: "http://fleetos-platform-simulator:8085"
   service:
     type: NodePort
     port: 5173
