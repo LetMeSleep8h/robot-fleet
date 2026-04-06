@@ -10,6 +10,8 @@ spec:
         value: "locomotion-default"
       - name: timesteps
         value: "2000000"
+      - name: env-id
+        value: "FleetOS-Humanoid-v2"
 
   templates:
     - name: train-and-eval
@@ -29,6 +31,7 @@ spec:
         args:
           - "--job-id={{workflow.parameters.job-id}}"
           - "--timesteps={{workflow.parameters.timesteps}}"
+          - "--env-id={{workflow.parameters.env-id}}"
           - "--output-dir=/tmp/output"
         envFrom:
           - secretRef:
