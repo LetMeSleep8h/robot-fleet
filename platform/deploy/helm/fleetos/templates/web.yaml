@@ -30,11 +30,11 @@ spec:
               name: http
           env:
             - name: VITE_API_URL
-              value: "http://{{ .Release.Name }}-api:{{ .Values.api.service.port }}"
+              value: {{ .Values.web.apiUrl | default (printf "http://%s-api:%v" .Release.Name (.Values.api.service.port)) | quote }}
             - name: VITE_WS_URL
-              value: "ws://{{ .Release.Name }}-api:{{ .Values.api.service.port }}"
+              value: {{ .Values.web.wsUrl | default (printf "ws://%s-api:%v" .Release.Name (.Values.api.service.port)) | quote }}
             - name: VITE_SIM_URL
-              value: "http://{{ .Release.Name }}-simulator:{{ .Values.simulator.service.port | default 8085 }}"
+              value: {{ .Values.web.simUrl | default (printf "http://%s-simulator:%v" .Release.Name (.Values.simulator.service.port | default 8085)) | quote }}
           resources:
             {{- toYaml .Values.web.resources | nindent 12 }}
           livenessProbe:
