@@ -38,3 +38,15 @@ nodes:
       - containerPort: 30173
         hostPort: 30173
         protocol: TCP
+      # Prometheus
+      - containerPort: 30090
+        hostPort: 30090
+        protocol: TCP
+      # Grafana
+      - containerPort: 30030
+        hostPort: 30030
+        protocol: TCP
+      # Argo Workflows UI
+      - containerPort: 30746
+        hostPort: 30746
+        protocol: TCP

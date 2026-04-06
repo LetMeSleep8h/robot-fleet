@@ -123,15 +123,15 @@ load_images() {
     log "  Loading $web_img..."
     kind load docker-image "$web_img" --name "$CLUSTER_NAME"
 
-    # Training (optional)
+    # Training
     cd "$PLATFORM_DIR"
     local train_img="fleetos/training:latest"
-    if docker image inspect "$train_img" >/dev/null 2>&1; then
-        log "  Loading $train_img..."
-        kind load docker-image "$train_img" --name "$CLUSTER_NAME"
-    else
-        warn "  $train_img not found (build with: make k8s-training-image)"
+    if ! docker image inspect "$train_img" >/dev/null 2>&1; then
+        log "  Building $train_img..."
+        docker build -t "$train_img" ./training 2>&1 | tail -1
     fi
+    log "  Loading $train_img..."
+    kind load docker-image "$train_img" --name "$CLUSTER_NAME"
 
     # External images that need pre-loading into kind.
     # Bitnami subcharts use :latest (specific version tags removed from Docker Hub).
@@ -252,10 +252,14 @@ install_argo_workflows() {
             -n argo --timeout=120s 2>/dev/null || true
     fi
 
-    # Apply training secrets and workflow templates
+    # Expose Argo UI via NodePort
+    kubectl patch svc argo-server -n argo --type merge \
+        -p '{"spec":{"type":"NodePort","ports":[{"port":2746,"targetPort":2746,"nodePort":30746}]}}'
+
+    # Apply training secrets and workflow templates in argo namespace
     kubectl apply -f "$K8S_DIR/training-secrets.yaml"
     if [ -d "$K8S_DIR/workflows" ] && ls "$K8S_DIR/workflows"/*.yaml >/dev/null 2>&1; then
-        kubectl apply -f "$K8S_DIR/workflows/"
+        kubectl apply -n argo -f "$K8S_DIR/workflows/"
     fi
 }
 
@@ -268,7 +272,7 @@ print_summary() {
     echo ""
     log "  ArgoCD UI:     http://localhost:30080"
     log "  ArgoCD Login:  admin / ${ARGOCD_PASSWORD:-<make k8s-argocd-password>}"
-    log "  Argo Wf UI:    http://localhost:32746"
+    log "  Argo Wf UI:    https://localhost:30746"
     echo ""
     log "  Services:"
     log "    Web UI:      http://localhost:30173"
@@ -276,6 +280,8 @@ print_summary() {
     log "    Ingestion:   localhost:30051 (gRPC)"
     log "    Inference:   http://localhost:30081"
     log "    Simulator:   http://localhost:30085"
+    log "    Prometheus:  http://localhost:30090"
+    log "    Grafana:     http://localhost:30030  (admin/admin)"
     echo ""
     log "  Commands:"
     log "    make k8s-status          # Pod and service status"
