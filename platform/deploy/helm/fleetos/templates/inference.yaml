@@ -23,6 +23,9 @@ spec:
         runAsNonRoot: true
         runAsUser: 999
         fsGroup: 65534
+      volumes:
+        - name: model-cache
+          emptyDir: {}
       containers:
         - name: inference
           securityContext:
@@ -55,6 +58,9 @@ spec:
               value: "{{ .Release.Name }}-redis-master:6379"
             - name: ENVIRONMENT
               value: {{ .Values.global.environment }}
+          volumeMounts:
+            - name: model-cache
+              mountPath: /tmp/fleetos-models
           resources:
             {{- toYaml .Values.inference.resources | nindent 12 }}
           livenessProbe:
