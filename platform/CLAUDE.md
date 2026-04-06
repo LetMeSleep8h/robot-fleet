@@ -54,12 +54,22 @@ make docker-build
 # Deploy to Kubernetes (Helm direct)
 make helm-install
 
-# Deploy to Kubernetes (kind + ArgoCD — local dev)
-make k8s-up            # Full stack: kind + ArgoCD + Argo Workflows
+# Deploy to Kubernetes (kind + ArgoCD — fully automated, no port-forwards)
+make k8s-up            # Full stack: kind + ArgoCD + Argo Workflows + all images
 make k8s-status        # Pod and service status
-make k8s-sync          # Force ArgoCD re-sync
+make k8s-sync          # Force ArgoCD re-sync after code changes
+make k8s-reload SVC=api  # Rebuild + reload image + restart
 make k8s-logs SVC=api  # Tail service logs
+make k8s-train TASK=locomotion TIMESTEPS=50000  # Submit training via Argo Workflows
+make k8s-argocd-password  # Get ArgoCD admin password
 make k8s-down          # Delete kind cluster
+
+# K8s dashboards (all NodePort — accessible immediately after make k8s-up):
+#   ArgoCD:         http://localhost:30080
+#   Argo Workflows: https://localhost:30746
+#   Grafana:        http://localhost:30030  (admin/admin)
+#   Prometheus:     http://localhost:30090
+#   Platform API:   http://localhost:30880
 ```
 
 ## Code Organization

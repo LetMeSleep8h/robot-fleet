@@ -104,7 +104,7 @@ robot-fleet/
 
 ### Option B: Kubernetes via ArgoCD (production-like)
 
-Platform runs on a local kind cluster managed by ArgoCD. Playground runs via Docker Compose, connecting to the platform through NodePorts.
+Platform runs on a local kind cluster managed by ArgoCD. Playground runs via Docker Compose, connecting to the platform through NodePorts. `make k8s-up` handles everything automatically — no manual port-forwards needed.
 
 ```bash
 # Start platform on Kubernetes (kind + ArgoCD + Argo Workflows)
@@ -113,7 +113,10 @@ Platform runs on a local kind cluster managed by ArgoCD. Playground runs via Doc
 # Start playground separately (connects to platform via NodePorts)
 cd playground && docker compose up -d
 
-# Train a model (required for robot movement)
+# Submit a training job on k8s (Argo Workflows DAG: train → evaluate)
+cd platform && make k8s-train TASK=reach TIMESTEPS=50000
+
+# Or train locally (faster for dev, uploads to MinIO)
 cd platform/training
 python3 train_locomotion.py --job-id demo --timesteps 50000 \
   --env-id FleetOS-Humanoid-v2 --s3-endpoint localhost:9000
@@ -122,20 +125,45 @@ python3 train_locomotion.py --job-id demo --timesteps 50000 \
 curl http://localhost:30880/healthz
 ```
 
+#### What `make k8s-up` automates
+
+1. Creates kind cluster with all NodePort mappings pre-configured
+2. Builds all Docker images (platform services + training)
+3. Loads all images into kind (platform + infra + training)
+4. Installs ArgoCD, patches repo-server with host repo mount
+5. Deploys FleetOS Helm chart via ArgoCD (auto-sync on git commits)
+6. Installs Argo Workflows, exposes UI via NodePort, applies workflow templates
+7. Prints all dashboard URLs
+
+#### K8s Management Commands
+
+```bash
+cd platform
+make k8s-status              # Pod and service status
+make k8s-logs SVC=api        # Tail service logs
+make k8s-sync                # Force ArgoCD re-sync after code changes
+make k8s-reload SVC=api      # Rebuild image + reload into kind + restart
+make k8s-train TASK=locomotion TIMESTEPS=100000  # Submit training workflow
+make k8s-argocd-password     # Get ArgoCD admin password
+make k8s-down                # Delete cluster
+```
+
 ### Access Points
 
 | Service | Docker Compose | Kubernetes (NodePort) |
 |---------|---------------|----------------------|
 | Platform API | http://localhost:8080 | http://localhost:30880 |
 | Admin Console | http://localhost:8080/admin/ | http://localhost:30880/admin/ |
-| Playground 3D | http://localhost:5173 | http://localhost:5173 |
+| Playground 3D | http://localhost:5173 | http://localhost:5173 (docker-compose) |
 | Inference | http://localhost:8081 | http://localhost:30081 |
 | Ingestion (gRPC) | localhost:50051 | localhost:30051 |
-| Simulator | http://localhost:8085 | http://localhost:30085 |
+| Simulator | http://localhost:8085 | http://localhost:8085 (docker-compose) |
 | ArgoCD UI | — | http://localhost:30080 |
-| Grafana | http://localhost:3000 | `kubectl port-forward svc/fleetos-platform-grafana 3000:3000 -n fleetos` |
-| Prometheus | http://localhost:9090 | `kubectl port-forward svc/fleetos-platform-prometheus 9090:9090 -n fleetos` |
-| Temporal UI | http://localhost:8233 | http://localhost:7233 |
+| Argo Workflows UI | — | https://localhost:30746 |
+| Grafana | http://localhost:3000 | http://localhost:30030 (admin/admin) |
+| Prometheus | http://localhost:9090 | http://localhost:30090 |
+| Temporal | http://localhost:8233 | gRPC only (localhost:7233) |
+| MinIO Console | http://localhost:9001 | `kubectl port-forward svc/fleetos-platform-minio 9001:9001 -n fleetos` |
 
 ### Try It
 

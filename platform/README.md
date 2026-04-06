@@ -81,12 +81,22 @@ AWS Managed: RDS Postgres (Multi-AZ, encrypted), ElastiCache Redis (HA),
 ../start.sh                   # Both platform + playground
 docker compose up -d          # Platform only
 
-# Option B: Kubernetes (kind + ArgoCD)
-make k8s-up                   # Full k8s stack with ArgoCD
+# Option B: Kubernetes (kind + ArgoCD) — fully automated, no port-forwards
+make k8s-up                   # Full k8s stack with ArgoCD + Argo Workflows
 make k8s-status               # Check pod status
 make k8s-logs SVC=api         # Tail logs
-make k8s-sync                 # Force ArgoCD re-sync
+make k8s-sync                 # Force ArgoCD re-sync after code changes
+make k8s-reload SVC=api       # Rebuild + reload image + restart pod
+make k8s-train TASK=locomotion TIMESTEPS=50000  # Submit training workflow
+make k8s-argocd-password      # Get ArgoCD admin password
 make k8s-down                 # Delete cluster
+
+# K8s Dashboards (all accessible automatically — no port-forward needed)
+# ArgoCD:          http://localhost:30080
+# Argo Workflows:  https://localhost:30746
+# Grafana:         http://localhost:30030  (admin/admin)
+# Prometheus:      http://localhost:30090
+# API:             http://localhost:30880
 
 # Verify (Docker Compose / Kubernetes)
 curl http://localhost:8080/healthz    # Docker Compose
