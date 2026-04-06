@@ -1,4 +1,4 @@
-{{- if .Values.analytics.enabled | default false }}
+{{- if and .Values.analytics .Values.analytics.enabled }}
 apiVersion: batch/v1
 kind: CronJob
 metadata:
