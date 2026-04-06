@@ -1,0 +1,177 @@
+{{- if .Values.grafana.enabled }}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ .Release.Name }}-grafana-datasources
+data:
+  datasources.yaml: |
+    apiVersion: 1
+    datasources:
+      - name: Prometheus
+        type: prometheus
+        access: proxy
+        url: http://{{ .Release.Name }}-prometheus:9090
+        isDefault: true
+        editable: false
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ .Release.Name }}-grafana-dashboards-provider
+data:
+  dashboards.yaml: |
+    apiVersion: 1
+    providers:
+      - name: FleetOS
+        folder: FleetOS
+        type: file
+        disableDeletion: false
+        options:
+          path: /var/lib/grafana/dashboards
+          foldersFromFilesStructure: false
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ .Release.Name }}-grafana-dashboards
+data:
+  {{- range $path, $_ := .Files.Glob "files/dashboards/*.json" }}
+  {{ base $path }}: |
+    {{- $.Files.Get $path | nindent 4 }}
+  {{- end }}
+  fleet-overview.json: |
+    {
+      "annotations": {"list": []},
+      "editable": true,
+      "title": "FleetOS Overview",
+      "uid": "fleetos-overview",
+      "panels": [
+        {
+          "title": "Active Robots",
+          "type": "stat",
+          "datasource": "Prometheus",
+          "targets": [{"expr": "fleetos_robots_active", "legendFormat": "Active"}],
+          "gridPos": {"h": 4, "w": 6, "x": 0, "y": 0}
+        },
+        {
+          "title": "API Request Rate",
+          "type": "timeseries",
+          "datasource": "Prometheus",
+          "targets": [{"expr": "rate(fleetos_http_requests_total[5m])", "legendFormat": "{{ "{{" }}method{{ "}}" }} {{ "{{" }}path{{ "}}" }}"}],
+          "gridPos": {"h": 8, "w": 12, "x": 0, "y": 4}
+        },
+        {
+          "title": "Telemetry Ingestion Rate",
+          "type": "timeseries",
+          "datasource": "Prometheus",
+          "targets": [{"expr": "rate(fleetos_telemetry_packets_total[5m])", "legendFormat": "packets/s"}],
+          "gridPos": {"h": 8, "w": 12, "x": 12, "y": 4}
+        },
+        {
+          "title": "Inference Latency (p95)",
+          "type": "timeseries",
+          "datasource": "Prometheus",
+          "targets": [{"expr": "histogram_quantile(0.95, rate(fleetos_inference_duration_seconds_bucket[5m]))", "legendFormat": "p95"}],
+          "gridPos": {"h": 8, "w": 12, "x": 0, "y": 12}
+        },
+        {
+          "title": "gRPC Active Streams",
+          "type": "stat",
+          "datasource": "Prometheus",
+          "targets": [{"expr": "fleetos_grpc_active_streams", "legendFormat": "Streams"}],
+          "gridPos": {"h": 4, "w": 6, "x": 6, "y": 0}
+        },
+        {
+          "title": "WebSocket Connections",
+          "type": "stat",
+          "datasource": "Prometheus",
+          "targets": [{"expr": "fleetos_websocket_connections", "legendFormat": "WS"}],
+          "gridPos": {"h": 4, "w": 6, "x": 12, "y": 0}
+        },
+        {
+          "title": "Error Rate (5xx)",
+          "type": "timeseries",
+          "datasource": "Prometheus",
+          "targets": [{"expr": "rate(fleetos_http_requests_total{status=~\"5..\"}[5m])", "legendFormat": "5xx/s"}],
+          "gridPos": {"h": 8, "w": 12, "x": 12, "y": 12}
+        }
+      ],
+      "schemaVersion": 39,
+      "time": {"from": "now-1h", "to": "now"},
+      "refresh": "10s"
+    }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Release.Name }}-grafana
+  labels:
+    app: grafana
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: grafana
+  template:
+    metadata:
+      labels:
+        app: grafana
+    spec:
+      securityContext:
+        fsGroup: 472
+        runAsUser: 472
+        runAsNonRoot: true
+      containers:
+        - name: grafana
+          image: grafana/grafana:11.4.0
+          ports:
+            - containerPort: 3000
+          env:
+            - name: GF_SECURITY_ADMIN_PASSWORD
+              value: {{ .Values.grafana.adminPassword | default "admin" | quote }}
+          volumeMounts:
+            - name: datasources
+              mountPath: /etc/grafana/provisioning/datasources
+            - name: dashboard-provider
+              mountPath: /etc/grafana/provisioning/dashboards
+            - name: dashboards
+              mountPath: /var/lib/grafana/dashboards
+            - name: data
+              mountPath: /var/lib/grafana
+          resources:
+            requests:
+              cpu: 50m
+              memory: 128Mi
+            limits:
+              cpu: 250m
+              memory: 256Mi
+      volumes:
+        - name: datasources
+          configMap:
+            name: {{ .Release.Name }}-grafana-datasources
+        - name: dashboard-provider
+          configMap:
+            name: {{ .Release.Name }}-grafana-dashboards-provider
+        - name: dashboards
+          configMap:
+            name: {{ .Release.Name }}-grafana-dashboards
+        - name: data
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ .Release.Name }}-grafana
+spec:
+  type: {{ .Values.grafana.service.type | default "ClusterIP" }}
+  ports:
+    - port: 3000
+      targetPort: 3000
+      name: http
+      {{- if .Values.grafana.service.nodePort }}
+      nodePort: {{ .Values.grafana.service.nodePort }}
+      {{- end }}
+  selector:
+    app: grafana
+{{- end }}

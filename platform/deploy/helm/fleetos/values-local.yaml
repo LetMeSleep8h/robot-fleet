@@ -204,6 +204,14 @@ istio:
 kubeflow:
   enabled: false
 prometheus:
-  enabled: false
+  enabled: true
+  service:
+    type: NodePort
+    nodePort: 30090
+
 grafana:
-  enabled: false
+  enabled: true
+  adminPassword: admin
+  service:
+    type: NodePort
+    nodePort: 30030
