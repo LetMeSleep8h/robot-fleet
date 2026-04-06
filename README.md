@@ -48,7 +48,7 @@ robot-fleet/
 
 ## Architecture
 
-> **Full production architecture diagrams:** [platform/docs/architecture-diagram.md](platform/docs/architecture-diagram.md) — Mermaid diagrams for system overview, telemetry flow, command pipeline, canary deployment, ML training, billing, and storage tiers.
+> **Full production architecture diagrams:** [platform/docs/architecture.md](platform/docs/architecture.md) — Mermaid diagrams for system overview, telemetry flow, command pipeline, canary deployment, ML training, billing, and storage tiers.
 
 ```
 ┌─ Playground (Robot) ─────────────────────────────┐
