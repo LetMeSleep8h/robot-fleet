@@ -1,5 +1,7 @@
 # FleetOS Platform Architecture
 
+> **See also:** [Production Architecture Diagrams](architecture-diagram.md) — comprehensive Mermaid diagrams covering system overview, data flows, canary deployment, ML pipeline, billing, and storage architecture.
+
 FleetOS is a distributed robot fleet management platform following the **Menlo OS pattern**: the platform (cloud) handles all reasoning and intelligence; robots handle execution only.
 
 ## System Overview
