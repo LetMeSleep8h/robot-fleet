@@ -1,3 +1,4 @@
+{{- if .Values.analytics.enabled | default false }}
 apiVersion: batch/v1
 kind: CronJob
 metadata:
@@ -59,3 +60,5 @@ spec:
             - name: analytics-scripts
               configMap:
                 name: {{ .Release.Name }}-analytics-scripts
+
+{{- end }}
