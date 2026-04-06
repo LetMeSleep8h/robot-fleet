@@ -77,7 +77,10 @@ def evaluate(args):
     model_path = download_model(args)
     model = PPO.load(model_path)
 
-    env = DummyVecEnv([lambda: gym.make("Humanoid-v4")])
+    from fleetos_env import register_fleetos_env
+    register_fleetos_env()
+    env_id = args.env_id
+    env = DummyVecEnv([lambda: gym.make(env_id)])
 
     # Try to load normalizer
     norm_path = Path(model_path).parent / "vec_normalize.pkl"
@@ -204,6 +207,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Evaluate locomotion policy")
     parser.add_argument("--eval-id", required=True)
     parser.add_argument("--model-path", required=True, help="S3 path or local path to policy.zip")
+    parser.add_argument("--env-id", default="FleetOS-Humanoid-v2", help="Gymnasium environment ID")
     parser.add_argument("--scenarios", type=int, default=100)
     parser.add_argument("--output-dir", default="/tmp/eval-output")
     parser.add_argument("--s3-endpoint", default=os.getenv("S3_ENDPOINT", ""))

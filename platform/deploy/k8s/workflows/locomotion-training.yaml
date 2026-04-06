@@ -50,7 +50,9 @@ spec:
         imagePullPolicy: Never
         command: [python, evaluate_policy.py]
         args:
-          - "--model-path=/tmp/output/policy.zip"
+          - "--eval-id={{workflow.parameters.job-id}}"
+          - "--model-path=s3://fleetos-models/training/{{workflow.parameters.job-id}}/policy.zip"
+          - "--env-id={{workflow.parameters.env-id}}"
           - "--output-dir=/tmp/eval"
         envFrom:
           - secretRef:
