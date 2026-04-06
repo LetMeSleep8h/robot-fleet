@@ -74,8 +74,20 @@ cd platform && make proto
 # Build Docker images
 cd platform && make docker-build
 
-# Deploy to Kubernetes
+# Deploy to Kubernetes (Helm direct)
 cd platform && make helm-install
+
+# Deploy to Kubernetes (kind + ArgoCD — local dev)
+cd platform && make k8s-up        # Full stack: kind cluster + ArgoCD + Argo Workflows
+cd platform && make k8s-status    # Pod and service status
+cd platform && make k8s-sync      # Force ArgoCD re-sync after code changes
+cd platform && make k8s-logs SVC=api  # Tail service logs
+cd platform && make k8s-down      # Delete kind cluster
+
+# Train a model (required for robot movement in inference)
+cd platform/training
+python3 train_locomotion.py --job-id demo --timesteps 50000 \
+  --env-id FleetOS-Humanoid-v2 --s3-endpoint localhost:9000
 ```
 
 ## Code Organization

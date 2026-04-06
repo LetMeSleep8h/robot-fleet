@@ -51,8 +51,15 @@ make proto
 # Build Docker images
 make docker-build
 
-# Deploy to Kubernetes
+# Deploy to Kubernetes (Helm direct)
 make helm-install
+
+# Deploy to Kubernetes (kind + ArgoCD — local dev)
+make k8s-up            # Full stack: kind + ArgoCD + Argo Workflows
+make k8s-status        # Pod and service status
+make k8s-sync          # Force ArgoCD re-sync
+make k8s-logs SVC=api  # Tail service logs
+make k8s-down          # Delete kind cluster
 ```
 
 ## Code Organization

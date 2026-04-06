@@ -15,7 +15,7 @@ robot-fleet/
 │   ├── migrations/         # PostgreSQL DDL migrations (001-008)
 │   ├── observability/      # Prometheus, Grafana, alerting
 │   ├── sdk/                # Python + TypeScript SDKs
-│   ├── training/           # SB3 PPO locomotion training pipeline
+│   ├── training/           # ML training pipeline (PPO, SAC+HER, CQL, BC, autoencoder)
 │   └── docker-compose.yml  # Full platform stack (17 services)
 └── playground/             # Robot simulator (MuJoCo + React 3D)
     ├── simulator/          # MuJoCo Humanoid-v4 physics + gRPC telemetry
@@ -32,8 +32,9 @@ robot-fleet/
 - **Admin Console** — React SPA at `/admin/` for tenant management, API key lifecycle (create/revoke), and billing overview
 - **Multi-tenant Auth & Billing** — JWT + OAuth2/OIDC + DB-backed API key auth, RBAC (4 roles), per-tenant rate limiting, usage metering, Temporal-based billing workflows with dunning
 - **AI Inference** — SB3 PPO policy serving with hot model swap, per-robot model assignment, performance metrics feedback loop
-- **ML Training Pipeline** — Temporal orchestrates the full lifecycle: collect experience → submit Kubeflow training (GPU + Katib HPO) → evaluate → register → canary deploy. Custom `FleetOS-Humanoid-v1` Gymnasium env matches production physics
-- **Experience Collection** — Simulator records (obs, action, reward, done) transitions at 10 Hz → S3 NDJSON batches for offline RL. 376-dim Humanoid-v4 observations for policy compatibility
+- **ML Training Pipeline** — Temporal orchestrates the full lifecycle: collect experience → submit Kubeflow training (GPU + Katib HPO) → evaluate → register → canary deploy. Supports 6 task types: locomotion (PPO), reaching (SAC+HER), grasping (SAC+HER + demos), offline RL (CQL), behavior cloning (supervised), and autoencoder (unsupervised)
+- **Multi-Algorithm Training** — PPO for locomotion, SAC+HER for goal-conditioned tasks (reaching, grasping), CQL for offline RL from collected experience, behavior cloning for supervised pre-training, autoencoder for unsupervised representation learning
+- **Experience Collection** — Simulator records (obs, action, reward, done) transitions at 10 Hz → S3 NDJSON batches for offline RL and behavior cloning. 86-dim unified observations across all tasks
 - **Kubeflow Integration** — Dedicated GPU node group (g5.2xlarge, scale-from-zero), Katib for Bayesian HPO (20 trials, 3 parallel), PyTorchJob for distributed training, IRSA for S3 access
 - **Canary Model Deployment** — Progressive rollout (5% → 25% → 50% → 100%) via Temporal workflows with deterministic robot selection, live success_rate comparison, and automatic rollback
 - **Performance Metrics** — Reward computation (forward velocity + alive bonus - control cost), uptime tracking, fall detection — fed back to model registry for canary evaluation
@@ -90,28 +91,51 @@ robot-fleet/
 - Docker & Docker Compose
 - Go 1.26+ (for local development)
 - Node.js 20+ (for admin console development)
+- kind, kubectl, helm (for Kubernetes mode)
 
-### Run Everything
+### Option A: Docker Compose (simplest)
 
 ```bash
-# Start platform (17 services) + playground (3 services)
-cd platform && docker compose up -d
+./start.sh                    # Start everything
+./start.sh --platform         # Platform only
+./start.sh --playground       # Playground only
+./start.sh down               # Stop everything
+```
+
+### Option B: Kubernetes via ArgoCD (production-like)
+
+Platform runs on a local kind cluster managed by ArgoCD. Playground runs via Docker Compose, connecting to the platform through NodePorts.
+
+```bash
+# Start platform on Kubernetes (kind + ArgoCD + Argo Workflows)
+./start.sh --k8s
+
+# Start playground separately (connects to platform via NodePorts)
 cd playground && docker compose up -d
 
+# Train a model (required for robot movement)
+cd platform/training
+python3 train_locomotion.py --job-id demo --timesteps 50000 \
+  --env-id FleetOS-Humanoid-v2 --s3-endpoint localhost:9000
+
 # Verify
-curl http://localhost:8080/healthz
+curl http://localhost:30880/healthz
 ```
 
 ### Access Points
 
-| Service | URL |
-|---------|-----|
-| Platform API | http://localhost:8080 |
-| Admin Console | http://localhost:8080/admin/ |
-| Playground 3D | http://localhost:5173 |
-| Temporal UI | http://localhost:8233 |
-| Grafana | http://localhost:3000 |
-| Prometheus | http://localhost:9090 |
+| Service | Docker Compose | Kubernetes (NodePort) |
+|---------|---------------|----------------------|
+| Platform API | http://localhost:8080 | http://localhost:30880 |
+| Admin Console | http://localhost:8080/admin/ | http://localhost:30880/admin/ |
+| Playground 3D | http://localhost:5173 | http://localhost:5173 |
+| Inference | http://localhost:8081 | http://localhost:30081 |
+| Ingestion (gRPC) | localhost:50051 | localhost:30051 |
+| Simulator | http://localhost:8085 | http://localhost:30085 |
+| ArgoCD UI | — | http://localhost:30080 |
+| Grafana | http://localhost:3000 | `kubectl port-forward svc/fleetos-platform-grafana 3000:3000 -n fleetos` |
+| Prometheus | http://localhost:9090 | `kubectl port-forward svc/fleetos-platform-prometheus 9090:9090 -n fleetos` |
+| Temporal UI | http://localhost:8233 | http://localhost:7233 |
 
 ### Try It
 
@@ -198,11 +222,18 @@ Tenant created → Temporal BillingCycleWorkflow (monthly, continue-as-new)
 Temporal TrainingPipelineWorkflow
   ├─ CollectExperienceStats — check S3 for robot experience data
   ├─ SubmitKubeflowRun — PyTorchJob (or Katib HPO) on GPU nodes
-  │     Training uses FleetOS-Humanoid-v1 env (custom lab_room.xml)
+  │     Task types: locomotion, reach, grasp, offline, bc, autoencoder
   │     Optional: --base-model (fine-tune) + --from-experience (S3 data)
   ├─ EvaluateTrainedModel — compare vs baseline (gate: ≥95% of baseline)
   ├─ RegisterTrainedModel — model registry (staged)
   └─ Auto-deploy → child ModelDeploymentWorkflow (canary rollout)
+
+Training approaches:
+  - Reinforcement Learning: PPO (locomotion), SAC+HER (reach, grasp)
+  - Offline RL: CQL from collected S3 experience (no env interaction)
+  - Supervised: Behavior cloning from expert demos or filtered experience
+  - Unsupervised: Autoencoder for 86→32-dim representation learning
+  - Typical workflow: BC pre-train → RL fine-tune (pass BC model as --base-model)
 
 Triggers: manual API, cron schedule, or success_rate drop below threshold
 ```
@@ -215,7 +246,11 @@ Robot runs in production/simulation
   → Processor aggregates uptime → model registry success_rate
                                                     ↓
   success_rate drops? → Temporal triggers TrainingPipelineWorkflow
-  → Kubeflow trains on FleetOS-Humanoid-v1 + experience from S3
+  → Kubeflow trains on FleetOS-Humanoid-v2 + experience from S3
+  → Multiple training modes available:
+      • Online RL (PPO/SAC+HER) from simulator interaction
+      • Offline RL (CQL) from collected S3 experience
+      • BC pre-train → RL fine-tune for faster convergence
   → New policy uploaded to S3 → registered as staged
   → Canary deploy: 5% → 25% → 50% → 100% (with auto-rollback)
   → Robots get new inference_model_id → inference uses it
@@ -236,9 +271,9 @@ go test -race ./internal/... ./test/...
 | Backend | Go 1.26, gRPC, Protocol Buffers, net/http |
 | Frontend | React 19, TypeScript, Three.js, Vite |
 | Orchestration | Temporal (commands, deployments, training pipeline, billing, webhooks) |
-| ML Training | Kubeflow (PyTorchJob, Katib HPO), SB3 PPO, custom Gymnasium env |
+| ML Training | Kubeflow (PyTorchJob, Katib HPO), SB3 PPO/SAC/CQL, behavior cloning, autoencoder |
 | ML Compute | GPU nodes (g5.2xlarge), scale-from-zero, IRSA for S3 |
-| AI/ML | Python, SB3 PPO, MuJoCo Humanoid-v4, experience replay |
+| AI/ML | Python, SB3, sb3-contrib, PyTorch, MuJoCo, FAISS, experience replay |
 | Messaging | Kafka (telemetry, commands, acks, deployment events) |
 | Storage | PostgreSQL 16, Redis 7, MinIO (S3), ClickHouse |
 | Analytics | Apache Spark, ClickHouse (OLAP) |

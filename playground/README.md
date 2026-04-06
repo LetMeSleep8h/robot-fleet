@@ -40,16 +40,28 @@ Inference :8081 (SB3 PPO, runs in platform stack)
 
 ## Quick Start
 
+### With Platform on Docker Compose
+
 ```bash
-# Platform must be running first
 cd ../platform && docker compose up -d
-
-# Start playground
 docker compose up -d
-
-# Open the web dashboard
 open http://localhost:5173
 ```
+
+### With Platform on Kubernetes (ArgoCD)
+
+When the platform runs on a kind cluster, the playground connects via NodePorts:
+
+```bash
+# Start platform on k8s
+cd ../platform && make k8s-up
+
+# Start playground (connects to platform NodePorts automatically)
+docker compose up -d
+open http://localhost:5173
+```
+
+The playground `docker-compose.yml` uses `host.docker.internal` to reach the platform k8s NodePorts (ingestion :30051, inference :30081, API :30880).
 
 ## Services
 
@@ -137,3 +149,4 @@ The training pipeline (`platform/training/train_locomotion.py`) can consume this
 | `S3_BUCKET` | fleetos-models | S3 bucket for experience batches |
 | `S3_ACCESS_KEY` | fleetos | S3 access key |
 | `S3_SECRET_KEY` | fleetos123 | S3 secret key |
+| `INFERENCE_URL` | http://inference:8081 | Inference service URL (use http://host.docker.internal:30081 for k8s) |

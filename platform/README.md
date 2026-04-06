@@ -7,7 +7,7 @@ A distributed robot fleet management platform following the **Menlo OS architect
 - **Real-time Telemetry Pipeline** -- Humanoid robots stream 20-DOF joint states, LiDAR, video, and audio over gRPC into Kafka, processed into Redis (hot state) + S3 (raw storage)
 - **Developer API Platform** -- REST, WebSocket, and gRPC APIs with OpenAPI 3.1 spec, TypeScript + Python SDKs
 - **Multi-tenant Auth & Billing** -- JWT + OAuth2/OIDC + API key authentication, RBAC (4 roles), per-tenant rate limiting, usage metering, 3-tier pricing (free/pro/enterprise)
-- **AI Inference** -- SB3 PPO policy serving with instruction bias, loads models from S3/MinIO, hot-swaps on deployment
+- **AI Inference** -- SB3 PPO/SAC policy serving with instruction bias, loads models from S3/MinIO, hot-swaps on deployment
 - **Durable Command Pipeline** -- Commands published to Kafka (`robot.commands`), consumed by processor, orchestrated via Temporal workflows with audit trail, ack tracking, retries, and timeout handling
 - **Semantic Commands** -- Natural language robot control via extensible command registry (strategy pattern), with FAISS-backed resolution for unmatched instructions (searches fleet state to resolve spatial commands like "go where the idle robots are")
 - **Model Registry** -- Model lifecycle management (staged -> canary -> deployed -> archived) with S3 artifact storage, canary deployment via Temporal workflows
@@ -77,14 +77,20 @@ AWS Managed: RDS Postgres (Multi-AZ, encrypted), ElastiCache Redis (HA),
 ### Run Locally
 
 ```bash
-# From repo root — start both platform and playground
-../start.sh
+# Option A: Docker Compose
+../start.sh                   # Both platform + playground
+docker compose up -d          # Platform only
 
-# Or start platform only
-docker compose up -d
+# Option B: Kubernetes (kind + ArgoCD)
+make k8s-up                   # Full k8s stack with ArgoCD
+make k8s-status               # Check pod status
+make k8s-logs SVC=api         # Tail logs
+make k8s-sync                 # Force ArgoCD re-sync
+make k8s-down                 # Delete cluster
 
-# Verify
-curl http://localhost:8080/healthz
+# Verify (Docker Compose / Kubernetes)
+curl http://localhost:8080/healthz    # Docker Compose
+curl http://localhost:30880/healthz   # Kubernetes (NodePort)
 # {"status":"ok"}
 
 # List robots
@@ -237,7 +243,7 @@ Watch inference: `docker logs -f platform-inference-1`
 
 ## ML Training Pipeline (Temporal + Kubeflow)
 
-Training is orchestrated by Temporal and executed by Kubeflow on dedicated GPU nodes.
+Training is orchestrated by Temporal and executed by Kubeflow on dedicated GPU nodes. The pipeline supports multiple learning paradigms: reinforcement learning (online and offline), supervised behavior cloning, and unsupervised representation learning.
 
 ```
 Temporal TrainingPipelineWorkflow (fleetos-training queue)
@@ -247,13 +253,11 @@ Temporal TrainingPipelineWorkflow (fleetos-training queue)
   │     (obs, action, reward, done) NDJSON from simulator
   │
   ├─ SubmitKubeflowRun ──────────► Kubeflow (kubeflow namespace)
+  │     │  Task types: locomotion, reach, grasp, offline, bc, autoencoder
   │     │                            ├─ Katib HPO (Bayesian, 20 trials, 3 parallel)
-  │     │                            │    lr ∈ [0.0001, 0.001]
-  │     │                            │    batch ∈ {32, 64, 128}
-  │     │                            │    epochs ∈ [5, 15]
   │     │                            ├─ PyTorchJob on g5.2xlarge GPU nodes
-  │     │                            │    FleetOS-Humanoid-v1 custom env
-  │     │                            │    7x sub-stepping, lab_room.xml physics
+  │     │                            │    Custom Gymnasium envs (lab_room.xml physics)
+  │     │                            │    7x sub-stepping, unified 86-dim observations
   │     │                            └─ Artifacts → S3 (policy.zip, metrics.json)
   │     └─ Waits for completion
   │
@@ -271,6 +275,22 @@ Temporal TrainingPipelineWorkflow (fleetos-training queue)
 - **Temporal** = orchestration brain (decides what, when, handles failures, gates, rollback)
 - **Kubeflow** = ML compute engine (GPU training, hyperparameter tuning, distributed jobs)
 
+### Training Algorithms
+
+| Task Type | Algorithm | Learning Type | Script | Environment |
+|-----------|-----------|---------------|--------|-------------|
+| `locomotion` | PPO | Reinforcement (on-policy) | `train_locomotion.py` | FleetOS-Humanoid-v2 |
+| `reach` | SAC+HER | Reinforcement (off-policy, semi-supervised) | `train_reach.py` | FleetOS-Reach-v1 |
+| `grasp` | SAC+HER | RL + optional scripted demos | `train_grasp.py` | FleetOS-Grasp-v1 |
+| `offline` | CQL | Offline RL from S3 experience | `train_offline.py` | (eval only) |
+| `bc` | Behavior Cloning | Supervised (expert demos) | `train_bc.py` | (eval only) |
+| `autoencoder` | Autoencoder | Unsupervised (observations) | `train_autoencoder.py` | N/A |
+
+**Typical workflow for complex tasks (e.g., grasping):**
+1. Collect experience via online RL or scripted demos
+2. Pre-train with behavior cloning: `python train_bc.py --task-type grasp --demo-source experience`
+3. Fine-tune with RL: `python train_grasp.py --base-model training/BC_001/policy.zip`
+
 ### Experience Collection
 
 The simulator collects RL experience at runtime and writes to S3:
@@ -278,37 +298,60 @@ The simulator collects RL experience at runtime and writes to S3:
 ```
 Simulator (50 Hz physics loop)
   → Every 5th step: record (obs, action, reward, done)
-  → obs: 376-dim Humanoid-v4 observation (qpos, qvel, cinert, cvel, forces)
+  → obs: 86-dim unified observation (joints, root, hands, grippers, objects, task)
   → Buffer 500 transitions → flush to S3 as NDJSON
   → S3 key: experience/{date}/{robot_id}/batch_{timestamp}.ndjson
 ```
 
-Training jobs can consume this experience for:
-- Pre-warming reward normalization (VecNormalize running stats)
-- Fine-tuning from deployed policy + real data
-- Future: offline RL (CQL, IQL, Decision Transformer)
+Training jobs consume this experience for:
+- **Online RL** — Pre-warming reward normalization (VecNormalize running stats)
+- **Offline RL (CQL)** — Training directly from S3 data without environment interaction
+- **Behavior Cloning** — Filtering high-reward transitions as expert demonstrations
+- **Autoencoder** — Learning compressed representations from observation vectors
 
-### Custom Training Environment
+### Custom Training Environments
 
-`training/fleetos_env.py` registers `FleetOS-Humanoid-v1` — a Gymnasium env using `lab_room.xml`:
-- Same physics as production simulator (0.003s timestep × 7 sub-steps)
-- Same reward function (forward velocity + alive bonus - control cost)
-- Same floor friction, walls, obstacles
-- Ensures trained policy works in the environment it's deployed to
+Three Gymnasium environments using `lab_room.xml`:
 
-### Training Modes
+| Environment | Obs Space | Action | Reward | Max Steps |
+|-------------|-----------|--------|--------|-----------|
+| FleetOS-Humanoid-v2 | Box(86,) | 25-dim joint targets | forward_vel + 1.0 - ctrl_cost | 1000 |
+| FleetOS-Reach-v1 | Dict{obs(86), goal(3), goal(3)} | 25-dim joint targets | Sparse: -1/0 (HER) | 200 |
+| FleetOS-Grasp-v1 | Dict{obs(86), goal(3), goal(3)} | 25-dim joint targets | Sparse: -1/0 (HER) | 300 |
+
+All share the same 86-dim unified observation format (`observation.py`), same physics (0.003s × 7 sub-steps), and same lab environment.
+
+### Training Commands
 
 ```bash
-# From scratch on custom lab env (default)
+# Locomotion (PPO, from scratch)
 python train_locomotion.py --job-id job-001 --timesteps 2000000
 
-# Fine-tune from deployed model with experience data
-python train_locomotion.py --job-id job-002 --timesteps 500000 \
-  --base-model training/job-001/policy.zip \
-  --from-experience experience/
+# Reaching (SAC+HER)
+python train_reach.py --job-id reach-001 --timesteps 500000
 
-# Use stock Gymnasium Humanoid-v4 (for comparison)
-python train_locomotion.py --job-id job-003 --env-id Humanoid-v4
+# Grasping (SAC+HER with scripted demonstrations)
+python train_grasp.py --job-id grasp-001 --timesteps 1000000 --generate-demos 1000
+
+# Offline RL (CQL from collected experience)
+python train_offline.py --job-id offline-001 --experience-prefix experience/ \
+  --gradient-steps 100000 --s3-endpoint minio:9000
+
+# Behavior cloning (supervised, from high-reward experience)
+python train_bc.py --job-id bc-001 --task-type locomotion \
+  --demo-source experience --min-reward 2.0 --s3-endpoint minio:9000
+
+# Behavior cloning (from expert policy rollouts)
+python train_bc.py --job-id bc-002 --task-type locomotion \
+  --demo-source expert --expert-model training/job-001/policy.zip
+
+# Fine-tune RL from BC pre-trained model
+python train_locomotion.py --job-id job-003 --timesteps 500000 \
+  --base-model training/bc-001/policy.zip
+
+# Autoencoder (unsupervised representation learning)
+python train_autoencoder.py --job-id ae-001 --experience-prefix experience/ \
+  --latent-dim 32 --epochs 200 --s3-endpoint minio:9000
 ```
 
 ### Infrastructure (Terraform + Helm)
@@ -382,8 +425,8 @@ platform/
 |   |   +-- workflows/          # Command, deployment, billing, training pipeline, webhook
 |   |   +-- activities/         # Command, deployment, billing, training, inference, webhook
 |   +-- config/                 # Environment-based configuration
-+-- inference/                   # Python inference service (SB3 PPO policy serving)
-|   +-- server.py               # SB3 PPO policy serving + instruction bias
++-- inference/                   # Python inference service (SB3 policy serving)
+|   +-- server.py               # SB3 PPO/SAC policy serving + instruction bias
 +-- analytics/                  # Spark analytics
 |   +-- telemetry_analytics.py  # PySpark batch job (S3 -> ClickHouse)
 |   +-- clickhouse-init.sql     # OLAP schema
@@ -410,7 +453,7 @@ platform/
 |-------|-------------|
 | Backend | Go 1.26, gRPC, Protocol Buffers, net/http |
 | Orchestration | Temporal (durable command workflows, deployment pipelines) |
-| AI/ML | Python, NumPy, FAISS, SB3 PPO Policy |
+| AI/ML | Python, PyTorch, SB3 (PPO, SAC, CQL), FAISS, MuJoCo |
 | Messaging | Kafka (Confluent), gRPC bidirectional streaming |
 | Storage | PostgreSQL 16, Redis 7, MinIO (S3), ClickHouse |
 | Analytics | Apache Spark (PySpark), ClickHouse (OLAP) |
