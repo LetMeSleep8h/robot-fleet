@@ -163,7 +163,7 @@ make k8s-down                # Delete cluster
 | Grafana | http://localhost:3000 | http://localhost:30030 (admin/admin) |
 | Prometheus | http://localhost:9090 | http://localhost:30090 |
 | Temporal | http://localhost:8233 | gRPC only (localhost:7233) |
-| MinIO Console | http://localhost:9001 | `kubectl port-forward svc/fleetos-platform-minio 9001:9001 -n fleetos` |
+| MinIO Console | http://localhost:9001 | http://localhost:30901 (fleetos/fleetos123) |
 
 ### Try It
 

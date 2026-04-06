@@ -50,3 +50,7 @@ nodes:
       - containerPort: 30746
         hostPort: 30746
         protocol: TCP
+      # MinIO Console
+      - containerPort: 30901
+        hostPort: 30901
+        protocol: TCP

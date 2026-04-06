@@ -7,6 +7,7 @@ metadata:
   labels:
     app: minio
 spec:
+  type: {{ (.Values.minioStandalone).serviceType | default "ClusterIP" }}
   ports:
     - name: api
       port: 9000
@@ -14,6 +15,9 @@ spec:
     - name: console
       port: 9001
       targetPort: 9001
+      {{- if (.Values.minioStandalone).consoleNodePort }}
+      nodePort: {{ .Values.minioStandalone.consoleNodePort }}
+      {{- end }}
   selector:
     app: minio
 ---

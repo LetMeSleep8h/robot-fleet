@@ -79,6 +79,8 @@ minioStandalone:
   rootUser: fleetos
   rootPassword: fleetos123
   buckets: "fleetos-telemetry,fleetos-models,fleetos-training-data"
+  serviceType: NodePort
+  consoleNodePort: 30901
 
 temporal:
   enabled: true
