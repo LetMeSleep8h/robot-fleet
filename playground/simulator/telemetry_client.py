@@ -24,7 +24,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "gen"))
 from proto.telemetry_pb2 import (
     TelemetryPacket, RobotState, Pose, Vector3, Quaternion,
     JointState, LidarScan, LidarPoint, VideoFrame, StreamAck,
-    PerformanceMetrics,
+    PerformanceMetrics, TrainingContext, ObjectState,
 )
 from proto.telemetry_pb2_grpc import TelemetryServiceStub
 
@@ -68,12 +68,17 @@ class TelemetryClient:
         self._stream_thread.start()
         log.info("gRPC channel ready, stream thread started")
 
-    def send_state(self, state: dict, robot_id: Optional[str] = None):
-        """Send a RobotState telemetry packet.
+    def send_state(self, state: dict, robot_id: Optional[str] = None,
+                   training_ctx: Optional[dict] = None):
+        """Send a RobotState telemetry packet with optional training context.
 
         Args:
-            state: dict from HumanoidSim.get_state()
+            state: dict from LabSimulation.get_robot_state()
             robot_id: Override robot ID. Defaults to self.robot_id.
+            training_ctx: Training data dict with keys:
+                action_taken (list[float]), step_reward (float),
+                task_command (str), episode_done (bool),
+                objects (list[dict])
         """
         if not self._connected:
             return
@@ -86,7 +91,6 @@ class TelemetryClient:
                 name=name, position=pos, velocity=vel, torque=torque
             ))
 
-        # Build performance metrics if available
         perf_metrics = None
         if "metrics" in state:
             m = state["metrics"]
@@ -98,6 +102,24 @@ class TelemetryClient:
                 episode_count=m.get("episode_count", 0),
                 uptime_pct=m.get("uptime_pct", 0.0),
                 forward_velocity=m.get("forward_velocity", 0.0),
+            )
+
+        # Build training context for offline RL
+        tc = None
+        if training_ctx:
+            obj_states = []
+            for obj in training_ctx.get("objects", []):
+                obj_states.append(ObjectState(
+                    name=obj["name"],
+                    position=Vector3(x=obj["pos_x"], y=obj["pos_y"], z=obj["pos_z"]),
+                    velocity=Vector3(x=obj["vel_x"], y=obj["vel_y"], z=obj["vel_z"]),
+                ))
+            tc = TrainingContext(
+                action_taken=training_ctx.get("action_taken", []),
+                step_reward=training_ctx.get("step_reward", 0.0),
+                task_command=training_ctx.get("task_command", "idle"),
+                episode_done=training_ctx.get("episode_done", False),
+                objects=obj_states,
             )
 
         robot_state = RobotState(
@@ -114,6 +136,7 @@ class TelemetryClient:
             status=state["status"],
             timestamp=_now_timestamp(),
             metrics=perf_metrics,
+            training_context=tc,
         )
 
         packet = TelemetryPacket(

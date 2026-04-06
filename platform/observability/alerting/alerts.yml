@@ -87,3 +87,37 @@ groups:
           severity: info
         annotations:
           summary: "GPU utilization below 10% for 30+ minutes — consider scaling down"
+
+  - name: fleetos-training
+    rules:
+      - alert: TrainingJobFailed
+        expr: increase(fleetos_training_jobs_total{status="failed"}[1h]) > 0
+        for: 1m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Training job failed in the last hour"
+
+      - alert: TrainingJobStuck
+        expr: fleetos_training_duration_seconds > 14400
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Training job running longer than 4 hours"
+
+      - alert: ModelDegradation
+        expr: fleetos_model_success_rate < 0.7
+        for: 15m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Deployed model success rate dropped below 70%"
+
+      - alert: CanaryRolledBack
+        expr: increase(fleetos_model_deployments_total{outcome="rolled_back"}[1h]) > 0
+        for: 1m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Canary deployment was rolled back in the last hour"

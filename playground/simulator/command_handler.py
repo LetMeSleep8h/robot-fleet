@@ -4,7 +4,7 @@ gRPC command receiver and command-to-MuJoCo-action translator.
 Opens a persistent StreamCommands gRPC stream to the ingestion service.
 Commands arrive as protobuf RobotCommand messages with command_type field.
 
-Translates commands into 17-dim MuJoCo torque arrays.
+Translates commands into 25-dim MuJoCo torque arrays (17 body + 4 ankle + 4 gripper).
 """
 
 import logging
@@ -27,7 +27,21 @@ from joint_mapping import FLEET_TO_MUJOCO_ACTUATOR
 
 log = logging.getLogger(__name__)
 
-NUM_ACTUATORS = 17
+NUM_ACTUATORS = 25
+
+# Actuator indices (matching lab_room.xml actuator order)
+# Body: 0-16 (original 17)
+ABDOMEN_Y, ABDOMEN_Z, ABDOMEN_X = 0, 1, 2
+R_HIP_X, R_HIP_Z, R_HIP_Y, R_KNEE = 3, 4, 5, 6
+L_HIP_X, L_HIP_Z, L_HIP_Y, L_KNEE = 7, 8, 9, 10
+R_SHOULDER1, R_SHOULDER2, R_ELBOW = 11, 12, 13
+L_SHOULDER1, L_SHOULDER2, L_ELBOW = 14, 15, 16
+# Ankles: 17-20
+R_ANKLE_Y, R_ANKLE_X = 17, 18
+L_ANKLE_Y, L_ANKLE_X = 19, 20
+# Grippers: 21-24
+R_GRIP_L, R_GRIP_R = 21, 22
+L_GRIP_L, L_GRIP_R = 23, 24
 
 
 class CommandHandler:
@@ -125,13 +139,13 @@ class CommandHandler:
         log.info("Command received via gRPC: %s params=%s", cmd_type, params)
 
     def get_action(self, sim_time: float) -> np.ndarray:
-        """Produce a 17-dim action array based on current command.
+        """Produce a 25-dim action array based on current command.
 
         Args:
             sim_time: Current simulation time in seconds.
 
         Returns:
-            np.ndarray of shape (17,) with values in [-1, 1].
+            np.ndarray of shape (25,) with values in [-1, 1].
         """
         with self._lock:
             cmd = self.current_command
@@ -185,45 +199,46 @@ class CommandHandler:
         return action
 
     def _idle_action(self, t: float) -> np.ndarray:
-        """Stabilization torques to keep the humanoid balanced while standing."""
+        """Standing pose: target joint angles in radians.
+
+        With position actuators, ctrl = desired joint angle.
+        0.0 = neutral/upright for all joints.
+        """
         action = np.zeros(NUM_ACTUATORS, dtype=np.float32)
-        action[1] = 0.15   # abdomen_y: lean forward
-        action[2] = 0.05   # abdomen_x: lateral stability
-        action[5] = 0.1    # right_hip_y
-        action[9] = 0.1    # left_hip_y
-        action[6] = -0.15  # right_knee (extend)
-        action[10] = -0.15 # left_knee (extend)
-        action[3] = 0.05   # right_hip_x
-        action[7] = -0.05  # left_hip_x
+        # All zeros = upright standing pose (PD controller holds it)
         return action
 
     def _walk_action(self, t: float) -> np.ndarray:
-        """Cyclic hip/knee torques to produce forward walking gait.
+        """Cyclic joint angle targets for forward walking gait.
 
-        Uses a ~1.2 Hz gait cycle with coordinated hip swing, knee flex,
-        ankle push-off, arm counter-swing, and forward torso lean.
+        With position actuators, ctrl = target angle (radians).
+        Uses small offsets from the standing pose (0).
         """
         action = np.zeros(NUM_ACTUATORS, dtype=np.float32)
-        phase = t * 1.2 * 2 * math.pi  # ~1.2 Hz gait cycle (~0.83s per stride)
+        phase = t * 1.2 * 2 * math.pi
 
-        # Hip pitch: alternating leg swing
-        action[5] = 0.5 * math.sin(phase)     # right hip
-        action[9] = -0.5 * math.sin(phase)    # left hip (anti-phase)
+        # Hip pitch: alternating leg swing (±0.4 rad ≈ ±23 deg)
+        action[R_HIP_Y] = -0.4 * math.sin(phase)
+        action[L_HIP_Y] = 0.4 * math.sin(phase)
 
-        # Knee: extend during stance, flex during swing
-        action[6] = 0.3 * max(0, math.sin(phase))     # right knee
-        action[10] = 0.3 * max(0, -math.sin(phase))   # left knee
+        # Knee: flex during swing (negative range in XML)
+        action[R_KNEE] = -0.5 * max(0, math.sin(phase))
+        action[L_KNEE] = -0.5 * max(0, -math.sin(phase))
 
-        # Hip roll: lateral weight shift for balance
-        action[3] = 0.1 * math.sin(phase * 0.5)       # right hip roll
-        action[7] = -0.1 * math.sin(phase * 0.5)      # left hip roll
+        # Hip roll: lateral weight shift
+        action[R_HIP_X] = 0.05 * math.sin(phase * 0.5)
+        action[L_HIP_X] = -0.05 * math.sin(phase * 0.5)
 
-        # Arm counter-swing (natural walking motion, keeps balance)
-        action[11] = -0.2 * math.sin(phase)   # right arm
-        action[14] = 0.2 * math.sin(phase)    # left arm
+        # Ankle pitch: push-off during stance
+        action[R_ANKLE_Y] = 0.2 * math.sin(phase)
+        action[L_ANKLE_Y] = -0.2 * math.sin(phase)
 
-        # Torso: constant forward lean to shift CoM over feet
-        action[1] = 0.12
+        # Arm counter-swing
+        action[R_SHOULDER1] = 0.3 * math.sin(phase)
+        action[L_SHOULDER1] = -0.3 * math.sin(phase)
+
+        # Slight forward lean
+        action[ABDOMEN_Y] = -0.1
 
         return action
 
@@ -232,25 +247,28 @@ class CommandHandler:
         action = np.zeros(NUM_ACTUATORS, dtype=np.float32)
         phase = t * 2.5 * 2 * math.pi
 
-        action[0] = 0.4 * math.sin(phase)
-        action[1] = 0.2 * math.sin(phase * 2)
-        action[11] = 0.5 * math.sin(phase)
-        action[14] = 0.5 * math.sin(phase + 1)
-        action[13] = 0.3 * math.sin(phase * 2)
-        action[16] = 0.3 * math.sin(phase * 2 + 1)
-        action[5] = 0.3 * math.sin(phase)
-        action[9] = 0.3 * math.sin(phase)
-        action[6] = 0.2 * abs(math.sin(phase))
-        action[10] = 0.2 * abs(math.sin(phase))
+        action[ABDOMEN_Z] = 0.4 * math.sin(phase)
+        action[ABDOMEN_Y] = 0.2 * math.sin(phase * 2)
+        action[R_SHOULDER1] = 0.5 * math.sin(phase)
+        action[L_SHOULDER1] = 0.5 * math.sin(phase + 1)
+        action[R_ELBOW] = 0.3 * math.sin(phase * 2)
+        action[L_ELBOW] = 0.3 * math.sin(phase * 2 + 1)
+        action[R_HIP_Y] = 0.3 * math.sin(phase)
+        action[L_HIP_Y] = 0.3 * math.sin(phase)
+        action[R_KNEE] = 0.2 * abs(math.sin(phase))
+        action[L_KNEE] = 0.2 * abs(math.sin(phase))
+        # Ankle support during dance
+        action[R_ANKLE_Y] = 0.15 * math.sin(phase)
+        action[L_ANKLE_Y] = 0.15 * math.sin(phase)
         return action
 
     def _wave_action(self, t: float) -> np.ndarray:
         """Wave the right arm."""
         action = self._idle_action(t)
         phase = t * 3 * 2 * math.pi
-        action[11] = -0.7
-        action[12] = 0.3
-        action[13] = 0.5 * math.sin(phase)
+        action[R_SHOULDER1] = -0.7
+        action[R_SHOULDER2] = 0.3
+        action[R_ELBOW] = 0.5 * math.sin(phase)
         return action
 
     def _jump_action(self, t: float) -> np.ndarray:
@@ -258,18 +276,24 @@ class CommandHandler:
         action = np.zeros(NUM_ACTUATORS, dtype=np.float32)
         tick = self.command_tick
 
-        if tick < 25:
-            action[5] = -0.8
-            action[9] = -0.8
-            action[6] = 0.8
-            action[10] = 0.8
-        elif tick < 35:
-            action[5] = 0.9
-            action[9] = 0.9
-            action[6] = -0.9
-            action[10] = -0.9
-        else:
-            action[1] = 0.1
+        if tick < 25:  # Crouch
+            action[R_HIP_Y] = -0.8
+            action[L_HIP_Y] = -0.8
+            action[R_KNEE] = 0.8
+            action[L_KNEE] = 0.8
+            action[R_ANKLE_Y] = -0.4
+            action[L_ANKLE_Y] = -0.4
+        elif tick < 35:  # Explode upward
+            action[R_HIP_Y] = 0.9
+            action[L_HIP_Y] = 0.9
+            action[R_KNEE] = -0.9
+            action[L_KNEE] = -0.9
+            action[R_ANKLE_Y] = 0.9  # Push off ground
+            action[L_ANKLE_Y] = 0.9
+        else:  # Recover
+            action[ABDOMEN_Y] = 0.1
+            action[R_ANKLE_Y] = 0.1
+            action[L_ANKLE_Y] = 0.1
             if tick > 75:
                 with self._lock:
                     self.current_command = "idle"
@@ -280,9 +304,11 @@ class CommandHandler:
         action = self._idle_action(t)
         tick = self.command_tick
         bow_amount = min(1.0, tick / 50) if tick < 50 else max(0.0, 1.0 - (tick - 75) / 50)
-        action[1] = 0.5 * bow_amount
-        action[5] = -0.2 * bow_amount
-        action[9] = -0.2 * bow_amount
+        action[ABDOMEN_Y] = 0.5 * bow_amount
+        action[R_HIP_Y] = -0.2 * bow_amount
+        action[L_HIP_Y] = -0.2 * bow_amount
+        action[R_ANKLE_Y] = 0.2 * bow_amount  # Counterbalance
+        action[L_ANKLE_Y] = 0.2 * bow_amount
         if tick > 125:
             with self._lock:
                 self.current_command = "idle"
@@ -292,18 +318,20 @@ class CommandHandler:
         """Bend knees to sit."""
         action = np.zeros(NUM_ACTUATORS, dtype=np.float32)
         sit = min(1.0, self.command_tick / 50)
-        action[5] = -0.6 * sit
-        action[9] = -0.6 * sit
-        action[6] = 0.7 * sit
-        action[10] = 0.7 * sit
-        action[1] = 0.15 * sit
+        action[R_HIP_Y] = -0.6 * sit
+        action[L_HIP_Y] = -0.6 * sit
+        action[R_KNEE] = 0.7 * sit
+        action[L_KNEE] = 0.7 * sit
+        action[ABDOMEN_Y] = 0.15 * sit
+        action[R_ANKLE_Y] = 0.3 * sit  # Keep feet flat
+        action[L_ANKLE_Y] = 0.3 * sit
         return action
 
     def _look_action(self, t: float) -> np.ndarray:
         """Pan head left and right."""
         action = self._idle_action(t)
-        action[0] = 0.4 * math.sin(t * 0.8 * 2 * math.pi)
-        action[1] = 0.1 * math.sin(t * 0.4 * 2 * math.pi)
+        action[ABDOMEN_Z] = 0.4 * math.sin(t * 0.8 * 2 * math.pi)
+        action[ABDOMEN_Y] = 0.1 * math.sin(t * 0.4 * 2 * math.pi)
         if self.command_tick > 200:
             with self._lock:
                 self.current_command = "idle"
@@ -313,11 +341,11 @@ class CommandHandler:
         """Arms up stretch."""
         action = self._idle_action(t)
         stretch = min(1.0, self.command_tick / 50)
-        action[11] = -0.7 * stretch
-        action[14] = -0.7 * stretch
-        action[13] = -0.3 * stretch
-        action[16] = -0.3 * stretch
-        action[0] = 0.2 * math.sin(t * 0.5 * 2 * math.pi) * stretch
+        action[R_SHOULDER1] = -0.7 * stretch
+        action[L_SHOULDER1] = -0.7 * stretch
+        action[R_ELBOW] = -0.3 * stretch
+        action[L_ELBOW] = -0.3 * stretch
+        action[ABDOMEN_Z] = 0.2 * math.sin(t * 0.5 * 2 * math.pi) * stretch
         if self.command_tick > 200:
             with self._lock:
                 self.current_command = "idle"

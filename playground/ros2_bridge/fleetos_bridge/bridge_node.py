@@ -29,7 +29,7 @@ import redis
 import requests
 
 
-# Standard humanoid joint names (matching FleetOS simulator)
+# Standard humanoid joint names (matching FleetOS simulator — 24 joints)
 JOINT_NAMES = [
     'head_pan', 'head_tilt',
     'left_shoulder_pitch', 'left_shoulder_roll', 'left_elbow',
@@ -38,6 +38,8 @@ JOINT_NAMES = [
     'left_knee', 'left_ankle_pitch', 'left_ankle_roll',
     'right_hip_yaw', 'right_hip_roll', 'right_hip_pitch',
     'right_knee', 'right_ankle_pitch', 'right_ankle_roll',
+    'right_gripper_left', 'right_gripper_right',
+    'left_gripper_left', 'left_gripper_right',
 ]
 
 

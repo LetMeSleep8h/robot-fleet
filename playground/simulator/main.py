@@ -1,13 +1,19 @@
 """
 MuJoCo lab room robot simulator for FleetOS.
 
-Runs real physics simulation in a custom lab environment and streams
-telemetry via gRPC to the ingestion service. Receives commands via gRPC
-StreamCommands. Rendering is done client-side via Three.js — physics only.
+All robot actions come from the inference server — no hardcoded gaits.
+The simulator is a pure physics engine + telemetry sender.
+
+Architecture:
+  TaskState  — receives gRPC commands, tracks what robot should do
+  InferenceClient — async HTTP client, gets actions from trained policies
+  LabSimulation — MuJoCo physics engine
+  TelemetryClient — streams state to platform
 
 Environment variables:
     ROBOT_ID        Initial robot identifier (default: robot-0001)
     GRPC_TARGET     Ingestion gRPC endpoint (default: ingestion:50051)
+    INFERENCE_URL   Inference service URL (default: http://inference:8081)
     SIM_STEP_HZ     Physics step rate (default: 50)
     TELEMETRY_HZ    Telemetry send rate (default: 10)
     CONTROL_PORT    HTTP control server port (default: 8085)
@@ -20,6 +26,8 @@ import signal
 import sys
 import time
 
+import numpy as np
+
 logging.basicConfig(
     level=logging.INFO,
     format='{"time":"%(asctime)s","level":"%(levelname)s","msg":"%(message)s"}',
@@ -31,40 +39,39 @@ log = logging.getLogger(__name__)
 def main():
     robot_id = os.environ.get("ROBOT_ID", "robot-0001")
     grpc_target = os.environ.get("GRPC_TARGET", "ingestion:50051")
+    inference_url = os.environ.get("INFERENCE_URL", "http://inference:8081")
     sim_step_hz = int(os.environ.get("SIM_STEP_HZ", "50"))
     telemetry_hz = int(os.environ.get("TELEMETRY_HZ", "10"))
     control_port = int(os.environ.get("CONTROL_PORT", "8085"))
 
     log.info("Starting MuJoCo lab simulator robot_id=%s target=%s", robot_id, grpc_target)
-    log.info("Physics: %d Hz, Telemetry: %d Hz", sim_step_hz, telemetry_hz)
+    log.info("Physics: %d Hz, Telemetry: %d Hz, Inference: %s", sim_step_hz, telemetry_hz, inference_url)
 
     from mujoco_env import LabSimulation
-    from command_handler import CommandHandler
+    from task_state import TaskState
+    from inference_client import InferenceClient
     from telemetry_client import TelemetryClient
-    from experience_writer import ExperienceWriter
+    from observation import build_observation_from_mujoco
     from frame_server import start_server, set_spawn_callback, set_list_robots_callback
 
     sim = LabSimulation()
-
-    # Experience writer — collects (obs, action, reward, done) for offline RL
-    s3_endpoint = os.environ.get("S3_ENDPOINT", "")
-    s3_bucket = os.environ.get("S3_BUCKET", "fleetos-models")
-    s3_access_key = os.environ.get("S3_ACCESS_KEY", "fleetos")
-    s3_secret_key = os.environ.get("S3_SECRET_KEY", "fleetos123")
-    experience = ExperienceWriter(s3_endpoint, s3_bucket, s3_access_key, s3_secret_key)
     spawn_queue: queue.Queue[str] = queue.Queue()
     spawn_results: dict[str, dict] = {}
 
-    # Per-robot command handlers — each opens a gRPC StreamCommands stream.
-    def _make_handler(rid: str) -> CommandHandler:
-        h = CommandHandler(grpc_target, rid)
-        h.start()
-        return h
+    # Per-robot task state (receives commands via gRPC) + inference client
+    def _make_task(rid: str) -> TaskState:
+        t = TaskState(grpc_target, rid)
+        t.start()
+        return t
 
-    commands: dict[str, CommandHandler] = {robot_id: _make_handler(robot_id)}
+    def _make_inference(rid: str) -> InferenceClient:
+        return InferenceClient(inference_url)
+
+    tasks: dict[str, TaskState] = {robot_id: _make_task(robot_id)}
+    infer: dict[str, InferenceClient] = {robot_id: _make_inference(robot_id)}
     telemetry = TelemetryClient(grpc_target, robot_id)
 
-    # Spawn runs on the main thread via queue (MuJoCo is not thread-safe)
+    # Spawn handler (HTTP thread → main thread via queue)
     def request_spawn() -> dict:
         req_id = str(time.time())
         spawn_queue.put(req_id)
@@ -78,7 +85,7 @@ def main():
     set_list_robots_callback(sim.get_all_robot_ids)
     start_server(control_port)
 
-    # Connect to ingestion gRPC
+    # Connect telemetry gRPC
     connected = False
     for attempt in range(30):
         try:
@@ -98,7 +105,6 @@ def main():
     telemetry_every = max(1, sim_step_hz // telemetry_hz)
     lidar_every = sim_step_hz  # 1 Hz
 
-    # Graceful shutdown
     running = True
 
     def shutdown(signum, frame):
@@ -116,58 +122,71 @@ def main():
         while running:
             loop_start = time.monotonic()
 
-            # Process spawn requests from HTTP thread
+            # Process spawn requests
             while not spawn_queue.empty():
                 req_id = spawn_queue.get_nowait()
                 result = sim.spawn_robot()
                 spawn_results[req_id] = result
                 new_rid = result.get("robot_id")
-                if new_rid and new_rid not in commands:
-                    commands[new_rid] = _make_handler(new_rid)
+                if new_rid and new_rid not in tasks:
+                    tasks[new_rid] = _make_task(new_rid)
+                    infer[new_rid] = _make_inference(new_rid)
 
-            # Get actions for each robot from its own command handler.
+            # Build observations, request inference, get actions
             robot_ids = sim.get_all_robot_ids()
-            sim_time = sim.sim_time
             actions = {}
-            for rid in robot_ids:
-                if rid not in commands:
-                    commands[rid] = _make_handler(rid)
-                actions[rid] = commands[rid].get_action(sim_time)
+            task_commands = {}
 
-            # Step physics
-            sim.step(actions)
+            for rid in robot_ids:
+                if rid not in tasks:
+                    tasks[rid] = _make_task(rid)
+                    infer[rid] = _make_inference(rid)
+
+                task = tasks[rid]
+                robot = sim._find_robot(rid)
+                if not robot:
+                    continue
+
+                # Build unified 86-dim observation
+                obs = build_observation_from_mujoco(
+                    sim.model, sim.data,
+                    robot["qpos_start"], robot["dof_start"],
+                    task_command=task.current_task,
+                )
+
+                # Request inference (non-blocking, ~10 Hz)
+                infer[rid].request_action(
+                    obs.tolist(),
+                    task.current_task,
+                    goal=task.current_goal,
+                )
+
+                # Use cached action (latest inference result)
+                actions[rid] = infer[rid].get_cached_action()
+                task_commands[rid] = task.current_task
+
+            # Step physics with task-conditional reward
+            sim.step(actions, task_commands=task_commands)
             step += 1
 
-            # Record experience for offline RL training
-            if step % 5 == 0:  # every 5th step to reduce volume
-                for rid in robot_ids:
-                    robot = sim._find_robot(rid)
-                    if robot and rid in actions:
-                        try:
-                            reward_step = robot.get("reward_accum", 0) / max(1, robot.get("episode_steps", 1))
-                            done = float(sim.data.qpos[robot["qpos_start"] + 2]) < 0.4
-                            experience.record(
-                                robot_id=rid,
-                                model=sim.model,
-                                data=sim.data,
-                                action=actions[rid],
-                                reward=reward_step,
-                                done=done,
-                                qpos_start=robot["qpos_start"],
-                                qvel_start=robot["qvel_start"],
-                                act_start=robot["actuator_start"],
-                            )
-                        except Exception:
-                            pass  # experience collection is best-effort
-
-            # Send telemetry for all robots
+            # Send telemetry with training context
             if step % telemetry_every == 0:
+                object_states = sim.get_object_states()
                 for rid in robot_ids:
                     state = sim.get_robot_state(rid)
                     if state:
-                        telemetry.send_state(state, robot_id=rid)
+                        robot = sim._find_robot(rid)
+                        height = sim.data.qpos[robot["qpos_start"] + 2] if robot else 1.0
+                        training_ctx = {
+                            "action_taken": actions[rid].tolist() if rid in actions else [],
+                            "step_reward": robot.get("reward_accum", 0) / max(1, robot["episode_steps"]) if robot else 0.0,
+                            "task_command": task_commands.get(rid, "idle"),
+                            "episode_done": height < 0.3,
+                            "objects": object_states,
+                        }
+                        telemetry.send_state(state, robot_id=rid, training_ctx=training_ctx)
 
-            # Send LiDAR at 1 Hz for all robots
+            # LiDAR at 1 Hz
             if step % lidar_every == 0:
                 for rid in robot_ids:
                     telemetry.send_lidar(robot_id=rid)
@@ -176,11 +195,11 @@ def main():
             if step % (sim_step_hz * 10) == 0:
                 state = sim.get_robot_state(robot_ids[0]) if robot_ids else None
                 if state:
-                    first_cmd = commands[robot_ids[0]].current_command if robot_ids else "idle"
-                    log.info("step=%d robots=%d pos=(%.2f, %.2f, %.2f) bat=%.0f%% cmd=%s",
+                    first_task = tasks[robot_ids[0]].current_task if robot_ids else "idle"
+                    log.info("step=%d robots=%d pos=(%.2f, %.2f, %.2f) bat=%.0f%% task=%s",
                              step, len(robot_ids),
                              state["pos_x"], state["pos_y"], state["pos_z"],
-                             state["battery"] * 100, first_cmd)
+                             state["battery"] * 100, first_task)
 
             # Maintain step rate
             elapsed = time.monotonic() - loop_start
@@ -192,10 +211,9 @@ def main():
         log.info("Interrupted")
     finally:
         log.info("Cleaning up after %d steps", step)
-        experience.close()
         sim.close()
-        for h in commands.values():
-            h.close()
+        for t in tasks.values():
+            t.close()
         telemetry.close()
 
 

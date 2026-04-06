@@ -45,6 +45,11 @@ scrape_configs:
       - targets: ["minio:9000"]
     metrics_path: /minio/v2/metrics/cluster
 
+  - job_name: "pushgateway"
+    honor_labels: true
+    static_configs:
+      - targets: ["pushgateway:9091"]
+
   - job_name: "prometheus"
     static_configs:
       - targets: ["localhost:9090"]

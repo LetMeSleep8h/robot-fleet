@@ -11,6 +11,7 @@ import (
 
 	"github.com/dimuthu/robot-fleet/internal/config"
 	"github.com/dimuthu/robot-fleet/internal/ingestion"
+	"github.com/dimuthu/robot-fleet/internal/service"
 	"github.com/dimuthu/robot-fleet/internal/store"
 	temporalpkg "github.com/dimuthu/robot-fleet/internal/temporal"
 	"github.com/dimuthu/robot-fleet/internal/temporal/activities"
@@ -78,7 +79,8 @@ func main() {
 
 	// Activity instances with injected dependencies
 	cmdActs := &activities.CommandActivities{Repo: pg, Cache: redis, Publisher: cmdDispatchProducer}
-	deployActs := &activities.DeploymentActivities{Models: pg, Robots: pg}
+	modelSvc := service.NewModelRegistryService(pg, redis)
+	deployActs := &activities.DeploymentActivities{Models: pg, Robots: pg, ModelService: modelSvc}
 	agentDeployActs := &activities.AgentDeploymentActivities{Agents: pg, Deployments: pg, Cache: redis, EventProducer: deployEventProducer}
 	webhookActs := activities.NewWebhookActivities()
 	billingActs := &activities.BillingActivities{Billing: pg, Cache: redis}
@@ -114,9 +116,18 @@ func main() {
 	billingWorker.RegisterActivity(billingActs)
 
 	// Training pipeline worker
-	trainingActs := &activities.TrainingActivities{Models: pg, Robots: pg}
+	argoSubmitter := &activities.ArgoSubmitter{
+		KubeContext: os.Getenv("ARGO_KUBE_CONTEXT"),
+		Namespace:   os.Getenv("ARGO_NAMESPACE"),
+	}
+	// If no kube context configured, submitter stays nil (stub mode)
+	if argoSubmitter.KubeContext == "" {
+		argoSubmitter = nil
+	}
+	trainingActs := &activities.TrainingActivities{Models: pg, Robots: pg, Submitter: argoSubmitter}
 	trainingWorker := worker.New(tc, temporalpkg.TaskQueueTraining, worker.Options{})
 	trainingWorker.RegisterWorkflow(workflows.TrainingPipelineWorkflow)
+	trainingWorker.RegisterWorkflow(workflows.RetrainingMonitorWorkflow)
 	trainingWorker.RegisterWorkflow(workflows.ModelDeploymentWorkflow) // child workflow for auto-deploy
 	trainingWorker.RegisterActivity(trainingActs)
 	trainingWorker.RegisterActivity(deployActs) // needed for canary child workflow

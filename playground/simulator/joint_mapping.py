@@ -1,16 +1,21 @@
 """
-Maps MuJoCo Humanoid-v4 joints to FleetOS 20-joint schema.
+Maps MuJoCo humanoid joints to FleetOS joint schema.
 
-MuJoCo Humanoid-v4 has 17 actuated joints. Our schema has 20.
-The 4 ankle joints (left/right ankle pitch/roll) have no MuJoCo equivalent
-and are reported as zero.
+MuJoCo humanoid has 25 actuated joints:
+  - 3 abdomen (z, y, x)
+  - 8 leg (hip_x, hip_z, hip_y, knee) × 2
+  - 4 ankle (ankle_y, ankle_x) × 2
+  - 6 arm (shoulder1, shoulder2, elbow) × 2
+  - 4 gripper (gripper_l, gripper_r) × 2
+
+Our fleet schema has 28 joints (25 actuated + abdomen_x unmapped + 3 mapped differently).
 """
 
-# MuJoCo Humanoid-v4 actuator index -> our joint name
-# Actuator order matches env.action_space (17 dims)
+# MuJoCo actuator index -> our joint name
+# Actuator order matches env.action_space (25 dims)
 MUJOCO_ACTUATOR_TO_FLEET = {
-    0: "head_pan",               # abdomen_z
-    1: "head_tilt",              # abdomen_y
+    0: "head_pan",               # abdomen_y
+    1: "head_tilt",              # abdomen_z
     2: None,                     # abdomen_x (no mapping)
     3: "right_hip_roll",         # right_hip_x
     4: "right_hip_yaw",          # right_hip_z
@@ -26,6 +31,14 @@ MUJOCO_ACTUATOR_TO_FLEET = {
     14: "left_shoulder_pitch",   # left_shoulder1
     15: "left_shoulder_roll",    # left_shoulder2
     16: "left_elbow",            # left_elbow
+    17: "right_ankle_pitch",     # right_ankle_y
+    18: "right_ankle_roll",      # right_ankle_x
+    19: "left_ankle_pitch",      # left_ankle_y
+    20: "left_ankle_roll",       # left_ankle_x
+    21: "right_gripper_left",    # right_gripper_l
+    22: "right_gripper_right",   # right_gripper_r
+    23: "left_gripper_left",     # left_gripper_l
+    24: "left_gripper_right",    # left_gripper_r
 }
 
 # Reverse: our joint name -> MuJoCo actuator index
@@ -36,16 +49,16 @@ FLEET_TO_MUJOCO_ACTUATOR = {
 # MuJoCo qpos indices for joints (after the 7 root body entries)
 # qpos[0:3] = root position (x, y, z)
 # qpos[3:7] = root quaternion (w, x, y, z)
-# qpos[7:24] = 17 joint angles
+# qpos[7:32] = 25 joint angles
 MUJOCO_QPOS_OFFSET = 7
 
 # MuJoCo qvel indices for joints (after the 6 root body entries)
 # qvel[0:3] = root linear velocity
 # qvel[3:6] = root angular velocity
-# qvel[6:23] = 17 joint velocities
+# qvel[6:31] = 25 joint velocities
 MUJOCO_QVEL_OFFSET = 6
 
-# Our full 20-joint schema (matching playground/internal/simulator/robot.go)
+# Full fleet joint schema (28 joints: 24 mapped + 4 gripper)
 FLEET_JOINT_NAMES = [
     "head_pan", "head_tilt",
     "left_shoulder_pitch", "left_shoulder_roll", "left_elbow",
@@ -54,11 +67,12 @@ FLEET_JOINT_NAMES = [
     "left_ankle_pitch", "left_ankle_roll",
     "right_hip_yaw", "right_hip_roll", "right_hip_pitch", "right_knee",
     "right_ankle_pitch", "right_ankle_roll",
+    "right_gripper_left", "right_gripper_right",
+    "left_gripper_left", "left_gripper_right",
 ]
 
-# Joints that exist only in our schema, not in MuJoCo
-UNMAPPED_JOINTS = {"left_ankle_pitch", "left_ankle_roll",
-                   "right_ankle_pitch", "right_ankle_roll"}
+# No unmapped joints — all fleet joints now have MuJoCo actuators
+UNMAPPED_JOINTS: set[str] = set()
 
 
 def extract_joint_states(qpos, qvel, actuator_force):

@@ -448,3 +448,97 @@ func TestGetUsage(t *testing.T) {
 		t.Errorf("expected 7 inference calls, got %d", result.InferenceCalls)
 	}
 }
+
+// --- Inference Forward Tests ---
+
+func TestForwardInferenceToRobot_ReturnsCommandType(t *testing.T) {
+	tests := []struct {
+		name        string
+		instruction string
+		wantCmd     string
+	}{
+		{"jump returns jump", "jump", "jump"},
+		{"walk returns walk", "walk forward", "walk"},
+		{"wave returns wave", "wave hello", "wave"},
+		{"dance returns dance", "dance around", "dance"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			producer := &mockCommandProducer{}
+			cache := newMockCache()
+			svc := NewRobotService(&mockRepo{}, cache, command.DefaultRegistry(), "", 0, WithCommandProducer(producer))
+			rs := svc.(*robotService)
+
+			inferenceBody := []byte(`{"predicted_actions":[{"joint":"left_knee","torque":0.5}]}`)
+			got := rs.forwardInferenceToRobot(context.Background(), "r1", tt.instruction, inferenceBody)
+			if got != tt.wantCmd {
+				t.Errorf("forwardInferenceToRobot(%q) = %q, want %q", tt.instruction, got, tt.wantCmd)
+			}
+
+			// Verify the Kafka message has the correct command type
+			if len(producer.messages) != 1 {
+				t.Fatalf("expected 1 Kafka message, got %d", len(producer.messages))
+			}
+			var msg CommandMessage
+			if err := json.Unmarshal(producer.messages[0], &msg); err != nil {
+				t.Fatalf("unmarshal: %v", err)
+			}
+			if msg.CmdType != tt.wantCmd {
+				t.Errorf("Kafka message CmdType = %q, want %q", msg.CmdType, tt.wantCmd)
+			}
+		})
+	}
+}
+
+func TestForwardInferenceToRobot_FallbackApplyActions(t *testing.T) {
+	producer := &mockCommandProducer{}
+	cache := newMockCache()
+	svc := NewRobotService(&mockRepo{}, cache, command.DefaultRegistry(), "", 0, WithCommandProducer(producer))
+	rs := svc.(*robotService)
+
+	inferenceBody := []byte(`{"predicted_actions":[{"joint":"left_knee","torque":0.5}]}`)
+	got := rs.forwardInferenceToRobot(context.Background(), "r1", "do something unknown", inferenceBody)
+	if got != "apply_actions" {
+		t.Errorf("expected apply_actions for unknown instruction, got %q", got)
+	}
+}
+
+func TestForwardInferenceToRobot_RedisLegacy(t *testing.T) {
+	cache := newMockCache()
+	svc := NewRobotService(&mockRepo{}, cache, command.DefaultRegistry(), "", 0)
+	rs := svc.(*robotService)
+
+	inferenceBody := []byte(`{"predicted_actions":[{"joint":"left_knee","torque":0.5}]}`)
+	got := rs.forwardInferenceToRobot(context.Background(), "r1", "jump", inferenceBody)
+	if got != "jump" {
+		t.Errorf("expected jump via Redis path, got %q", got)
+	}
+	if len(cache.published) != 1 || cache.published[0] != "commands:r1" {
+		t.Errorf("expected Redis publish to commands:r1, got %v", cache.published)
+	}
+}
+
+func TestInjectDispatchedCommand(t *testing.T) {
+	body := []byte(`{"model_id":"ppo","confidence":0.85}`)
+	result := injectDispatchedCommand(body, "jump")
+
+	var resp map[string]any
+	if err := json.Unmarshal(result, &resp); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if resp["dispatched_command"] != "jump" {
+		t.Errorf("expected dispatched_command=jump, got %v", resp["dispatched_command"])
+	}
+	if resp["model_id"] != "ppo" {
+		t.Errorf("expected model_id preserved, got %v", resp["model_id"])
+	}
+}
+
+func TestInjectDispatchedCommand_InvalidJSON(t *testing.T) {
+	body := []byte(`not json`)
+	result := injectDispatchedCommand(body, "jump")
+	if string(result) != string(body) {
+		t.Error("expected original body returned for invalid JSON")
+	}
+}

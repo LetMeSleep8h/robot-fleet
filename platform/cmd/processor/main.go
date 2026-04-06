@@ -247,6 +247,31 @@ func main() {
 		s3Buffers[robotID] = nil
 	}
 
+	// Training transition buffers — written to S3 when training_context is present.
+	trainingBuffers := make(map[string][]byte)
+	trainingCounts := make(map[string]int64)
+
+	flushTrainingBuffer := func(robotID string) {
+		buf := trainingBuffers[robotID]
+		if len(buf) == 0 {
+			return
+		}
+		now := time.Now()
+		s3Key := fmt.Sprintf("training_data/%s/%s/transitions_%d.ndjson",
+			now.Format("2006/01/02/15"),
+			robotID,
+			now.UnixNano(),
+		)
+		if err := s3.Put(ctx, s3Key, buf, "application/x-ndjson"); err != nil {
+			slog.Error("failed to flush training transitions", "robot", robotID, "error", err)
+		} else {
+			middleware.ExperienceBatchesWritten.Inc()
+			slog.Debug("flushed training transitions", "robot", robotID, "key", s3Key)
+		}
+		trainingBuffers[robotID] = nil
+		trainingCounts[robotID] = 0
+	}
+
 	// sendToDLQ routes a failed message to the dead letter queue.
 	sendToDLQ := func(key, value []byte, reason string) {
 		if dlqProducer == nil {
@@ -363,6 +388,9 @@ func main() {
 			for robotID := range s3Buffers {
 				flushS3Buffer(robotID)
 			}
+			for robotID := range trainingBuffers {
+				flushTrainingBuffer(robotID)
+			}
 			lastFlush = time.Now()
 		}
 
@@ -370,6 +398,47 @@ func main() {
 		state := pkt.GetState()
 		if state == nil {
 			return nil
+		}
+
+		// Write training transitions to S3 when training_context is present
+		if tc := state.GetTrainingContext(); tc != nil && len(tc.ActionTaken) > 0 {
+			objects := make([]map[string]any, 0, len(tc.Objects))
+			for _, obj := range tc.Objects {
+				objects = append(objects, map[string]any{
+					"name":  obj.Name,
+					"pos_x": obj.Position.GetX(), "pos_y": obj.Position.GetY(), "pos_z": obj.Position.GetZ(),
+					"vel_x": obj.Velocity.GetX(), "vel_y": obj.Velocity.GetY(), "vel_z": obj.Velocity.GetZ(),
+				})
+			}
+			// Build joint arrays for the observation
+			jointPos := make([]float64, 0, len(state.Joints))
+			jointVel := make([]float64, 0, len(state.Joints))
+			for _, j := range state.Joints {
+				jointPos = append(jointPos, j.Position)
+				jointVel = append(jointVel, j.Velocity)
+			}
+			transition := map[string]any{
+				"robot_id":     state.RobotId,
+				"joint_pos":    jointPos,
+				"joint_vel":    jointVel,
+				"root_pos":     []float64{state.Pose.GetPosition().GetX(), state.Pose.GetPosition().GetY(), state.Pose.GetPosition().GetZ()},
+				"root_quat":    []float64{state.Pose.GetOrientation().GetX(), state.Pose.GetOrientation().GetY(), state.Pose.GetOrientation().GetZ(), state.Pose.GetOrientation().GetW()},
+				"action":       tc.ActionTaken,
+				"reward":       tc.StepReward,
+				"task_command": tc.TaskCommand,
+				"episode_done": tc.EpisodeDone,
+				"objects":      objects,
+				"ts":           time.Now().Unix(),
+			}
+			tLine, _ := json.Marshal(transition)
+			trainingBuffers[pkt.RobotId] = append(trainingBuffers[pkt.RobotId], tLine...)
+			trainingBuffers[pkt.RobotId] = append(trainingBuffers[pkt.RobotId], '\n')
+			trainingCounts[pkt.RobotId]++
+			middleware.ExperienceTransitionsTotal.Inc()
+
+			if trainingCounts[pkt.RobotId] >= int64(s3BatchSize) {
+				flushTrainingBuffer(pkt.RobotId)
+			}
 		}
 
 		now := time.Now()

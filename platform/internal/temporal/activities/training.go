@@ -13,8 +13,9 @@ import (
 
 // TrainingActivities holds dependencies for ML training pipeline activities.
 type TrainingActivities struct {
-	Models store.ModelRepository
-	Robots store.RobotRepository
+	Models    store.ModelRepository
+	Robots    store.RobotRepository
+	Submitter *ArgoSubmitter
 }
 
 // CollectExperienceInput is the input for CollectExperienceStats.
@@ -49,6 +50,8 @@ type SubmitKubeflowRunInput struct {
 	BaseModel      string `json:"base_model"`      // S3 key for fine-tuning, empty = from scratch
 	FromExperience string `json:"from_experience"` // S3 prefix for experience data
 	UseKatib       bool   `json:"use_katib"`       // use HPO via Katib
+	TaskType       string `json:"task_type"`        // "locomotion" or "reach"
+	Algorithm      string `json:"algorithm"`        // "ppo" or "sac"
 }
 
 // SubmitKubeflowRunOutput is the result of submitting a training run.
@@ -58,27 +61,55 @@ type SubmitKubeflowRunOutput struct {
 	ModelPath string `json:"model_path"`
 }
 
-// SubmitKubeflowRun submits a training job to Kubeflow and waits for completion.
-// In production, this creates a Kubeflow Pipeline Run or Katib Experiment via the
-// Kubeflow API. For now, it submits a K8s Job directly (matching our existing
-// TrainingService pattern) and polls for completion via the callback endpoint.
+// SubmitKubeflowRun submits a training job via Argo Workflows (if configured)
+// or falls back to stub behavior for local development.
 func (a *TrainingActivities) SubmitKubeflowRun(ctx context.Context, input SubmitKubeflowRunInput) (*SubmitKubeflowRunOutput, error) {
-	slog.Info("submitting training run to Kubeflow",
+	slog.Info("submitting training run",
 		"job_id", input.JobID,
 		"timesteps", input.Timesteps,
 		"env_id", input.EnvID,
+		"task_type", input.TaskType,
+		"algorithm", input.Algorithm,
 		"base_model", input.BaseModel,
 		"katib", input.UseKatib,
 	)
 
-	// In production: POST to Kubeflow Pipeline API
-	// POST http://ml-pipeline.kubeflow.svc:8888/apis/v1beta1/runs
-	// For Katib: POST http://katib.kubeflow.svc:8443/api/v1/experiments
-	//
-	// For now, return the expected artifact URL — the actual training is
-	// triggered by the existing TrainingService K8s job submission.
 	artifactURL := fmt.Sprintf("training/%s/policy.zip", input.JobID)
 
+	// Use ArgoSubmitter if configured, otherwise fall back to stub
+	if a.Submitter != nil {
+		taskType := input.TaskType
+		if taskType == "" {
+			taskType = "locomotion"
+		}
+
+		workflowName, err := a.Submitter.SubmitTraining(ctx, TrainingRunInput{
+			JobID:     input.JobID,
+			TaskType:  taskType,
+			Timesteps: input.Timesteps,
+		})
+		if err != nil {
+			return nil, fmt.Errorf("submit training run: %w", err)
+		}
+
+		result, err := a.Submitter.WaitForCompletion(ctx, workflowName)
+		if err != nil {
+			return nil, fmt.Errorf("training run failed: %w", err)
+		}
+
+		if result.ModelPath != "" {
+			artifactURL = result.ModelPath
+		}
+
+		return &SubmitKubeflowRunOutput{
+			RunID:     workflowName,
+			Status:    "completed",
+			ModelPath: artifactURL,
+		}, nil
+	}
+
+	// Stub mode: return the expected artifact URL without running actual training
+	slog.Info("argo submitter not configured, using stub mode", "job_id", input.JobID)
 	return &SubmitKubeflowRunOutput{
 		RunID:     input.JobID,
 		Status:    "submitted",
@@ -102,7 +133,8 @@ type EvaluateModelOutput struct {
 }
 
 // EvaluateTrainedModel compares the trained model against the current baseline
-// using the model registry's success_rate metric.
+// using the model registry's eval_mean_reward metric. If no real eval data is
+// available (first model), the gate auto-passes.
 func (a *TrainingActivities) EvaluateTrainedModel(ctx context.Context, input EvaluateModelInput) (*EvaluateModelOutput, error) {
 	output := &EvaluateModelOutput{}
 
@@ -114,10 +146,24 @@ func (a *TrainingActivities) EvaluateTrainedModel(ctx context.Context, input Eva
 		}
 	}
 
-	// For now, the evaluation happens during training (evaluate_policy at end of train_locomotion.py).
-	// The callback delivers eval_mean_reward in the results JSON.
-	// In production, this would run a separate evaluation job on the trained model.
-	output.MeanReward = 5.34 // placeholder — set from training callback results
+	// Try to read eval results from the most recently staged model's metrics
+	// (the training callback writes eval_mean_reward into the model record).
+	// If no staged model exists yet, this is the first training run — auto-pass.
+	staged, err := a.Models.ListModels(ctx, "staged")
+	if err == nil && len(staged) > 0 {
+		reward := metricFloat(staged[0].Metrics, "eval_mean_reward")
+		if reward > 0 {
+			output.MeanReward = reward
+		}
+	}
+
+	// If no real eval data found, first model auto-passes the gate
+	if output.MeanReward == 0 && output.BaselineReward == 0 {
+		output.PassesGate = true
+		slog.Info("first model — auto-passing evaluation gate")
+		return output, nil
+	}
+
 	if output.BaselineReward > 0 {
 		output.Improvement = ((output.MeanReward - output.BaselineReward) / output.BaselineReward) * 100
 	}
@@ -142,6 +188,8 @@ type RegisterTrainedModelInput struct {
 	ArtifactURL string  `json:"artifact_url"`
 	MeanReward  float64 `json:"mean_reward"`
 	Environment string  `json:"environment"`
+	TaskType    string  `json:"task_type"`
+	Algorithm   string  `json:"algorithm"`
 }
 
 // RegisterTrainedModel registers a trained model in the model registry as staged.
@@ -157,6 +205,8 @@ func (a *TrainingActivities) RegisterTrainedModel(ctx context.Context, input Reg
 		Metrics: map[string]any{
 			"eval_mean_reward": input.MeanReward,
 			"environment":      input.Environment,
+			"task_type":        input.TaskType,
+			"algorithm":        input.Algorithm,
 			"trained_at":       time.Now().UTC().Format(time.RFC3339),
 		},
 		CreatedAt: time.Now().UTC(),

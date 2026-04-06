@@ -20,14 +20,14 @@ log = logging.getLogger(__name__)
 ASSETS_DIR = Path(__file__).parent / "assets"
 LAB_XML = ASSETS_DIR / "lab_room.xml"
 
-# Humanoid body constants
-NUM_ACTUATORS = 17
+# Humanoid body constants (17 body + 4 ankle + 4 gripper = 25 actuators)
+NUM_ACTUATORS = 25
 ROOT_QPOS_SIZE = 7   # 3 pos + 4 quat
 ROOT_QVEL_SIZE = 6   # 3 lin vel + 3 ang vel
-JOINT_QPOS_SIZE = 17
-JOINT_QVEL_SIZE = 17
-BODY_QPOS_SIZE = ROOT_QPOS_SIZE + JOINT_QPOS_SIZE  # 24
-BODY_QVEL_SIZE = ROOT_QVEL_SIZE + JOINT_QVEL_SIZE   # 23
+JOINT_QPOS_SIZE = 25
+JOINT_QVEL_SIZE = 25
+BODY_QPOS_SIZE = ROOT_QPOS_SIZE + JOINT_QPOS_SIZE  # 32
+BODY_QVEL_SIZE = ROOT_QVEL_SIZE + JOINT_QVEL_SIZE   # 31
 
 
 
@@ -46,25 +46,44 @@ class LabSimulation:
         self.model = mujoco.MjModel.from_xml_string(xml_string)
         self.data = mujoco.MjData(self.model)
 
-        # Rebuild robot tracking from model state
+        # Rebuild robot tracking using mj_name2id for correct offsets.
+        # Dynamic objects (red_box, blue_cylinder) have freejoints that
+        # occupy qpos slots before the humanoid, so we can't assume
+        # the humanoid starts at qpos[0].
         self.robots = []
         for i in range(self.robot_count):
+            suffix = "" if i == 0 else f"_{i+1}"
+            torso_name = f"torso{suffix}"
+
+            # Find the root joint for this robot
+            jnt_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_JOINT, f"root{suffix}")
+            qpos_start = self.model.jnt_qposadr[jnt_id]
+            qvel_start = self.model.jnt_dofadr[jnt_id]
+
+            # Find the first actuator for this robot
+            act_name = f"abdomen_y{suffix}"
+            act_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_ACTUATOR, act_name)
+            actuator_start = act_id  # actuators are contiguous per robot
+
             self.robots.append({
                 "id": f"robot-{i+1:04d}",
-                "qpos_start": i * BODY_QPOS_SIZE,
-                "qvel_start": i * BODY_QVEL_SIZE,
-                "actuator_start": i * NUM_ACTUATORS,
+                "qpos_start": qpos_start,
+                "qvel_start": qvel_start,
+                "dof_start": qvel_start,   # same as qvel_start, used by observation builder
+                "actuator_start": actuator_start,
                 "battery": 1.0,
                 "status": "active",
-                # Performance metrics (Humanoid-v4 reward decomposition)
-                "prev_x": 0.0,          # previous x position for velocity calc
-                "reward_accum": 0.0,     # accumulated reward this episode
-                "episode_steps": 0,      # steps since last reset
-                "fall_count": 0,         # total falls
-                "episode_count": 0,      # total episodes (resets)
-                "total_reward": 0.0,     # lifetime accumulated reward
-                "total_steps": 0,        # lifetime steps
+                "prev_x": 0.0,
+                "reward_accum": 0.0,
+                "episode_steps": 0,
+                "fall_count": 0,
+                "episode_count": 0,
+                "total_reward": 0.0,
+                "total_steps": 0,
             })
+
+            log.info("Robot %s: qpos_start=%d, qvel_start=%d, act_start=%d",
+                     self.robots[-1]["id"], qpos_start, qvel_start, actuator_start)
 
         mujoco.mj_step(self.model, self.data)
         log.info("Model loaded: %d robots, %d actuators, %d qpos",
@@ -147,10 +166,13 @@ class LabSimulation:
                 "left_hip_x", "left_hip_z", "left_hip_y", "left_knee",
                 "right_shoulder1", "right_shoulder2", "right_elbow",
                 "left_shoulder1", "left_shoulder2", "left_elbow",
+                "right_ankle_y", "right_ankle_x", "left_ankle_y", "left_ankle_x",
+                "right_gripper_l", "right_gripper_r", "left_gripper_l", "left_gripper_r",
             ]
-            gears = [100, 100, 100, 100, 100, 300, 200, 100, 100, 300, 200, 25, 25, 25, 25, 25, 25]
-            for name, gear in zip(actuator_names, gears):
-                extra_actuators += f'        <motor gear="{gear}" joint="{name}{suffix}" name="{name}{suffix}"/>\n'
+            kps = [200, 200, 200, 300, 200, 400, 350, 300, 200, 400, 350, 80, 80, 60, 80, 80, 60,
+                   300, 150, 300, 150, 20, 20, 20, 20]
+            for name, kp in zip(actuator_names, kps):
+                extra_actuators += f'        <position joint="{name}{suffix}" name="{name}{suffix}" kp="{kp}"/>\n'
 
         # Insert extra bodies before cameras
         xml = xml.replace(
@@ -170,7 +192,7 @@ class LabSimulation:
         """Generate a humanoid body block with renamed joints and position offset."""
         # This is the humanoid body from the base XML with all names suffixed
         return f"""
-        <body name="torso{suffix}" pos="{px} {py} 1.4">
+        <body name="torso{suffix}" pos="{px} {py} 1.22">
             <joint armature="0" damping="0" limited="false" name="root{suffix}" pos="0 0 0" stiffness="0" type="free"/>
             <geom fromto="0 -.07 0 0 .07 0" name="torso1{suffix}" size="0.07" type="capsule"/>
             <geom name="head{suffix}" pos="0 0 .19" size=".09" type="sphere" user="258"/>
@@ -190,8 +212,10 @@ class LabSimulation:
                         <body name="right_shin{suffix}" pos="0 0.01 -0.403">
                             <joint armature="0.0060" axis="0 -1 0" name="right_knee{suffix}" pos="0 0 .02" range="-160 -2" type="hinge"/>
                             <geom fromto="0 0 0 0 0 -.3" name="right_shin1{suffix}" size="0.049" type="capsule"/>
-                            <body name="right_foot{suffix}" pos="0 0 -0.45">
-                                <geom name="right_foot{suffix}" pos="0 0 0.1" size="0.075" type="sphere" user="0"/>
+                            <body name="right_foot{suffix}" pos="0 0 -0.35">
+                                <joint armature="0.01" axis="0 1 0" damping="8" name="right_ankle_y{suffix}" pos="0 0 0.05" range="-45 45" stiffness="20" type="hinge"/>
+                                <joint armature="0.008" axis="1 0 0" damping="5" name="right_ankle_x{suffix}" pos="0 0 0.05" range="-25 25" stiffness="15" type="hinge"/>
+                                <geom name="right_foot{suffix}" type="box" size="0.1 0.05 0.015" pos="0.03 0 0" condim="4" contype="1" conaffinity="1" friction="1.2 0.005 0.001" rgba="0.5 0.5 0.5 1"/>
                             </body>
                         </body>
                     </body>
@@ -203,8 +227,10 @@ class LabSimulation:
                         <body name="left_shin{suffix}" pos="0 -0.01 -0.403">
                             <joint armature="0.0060" axis="0 -1 0" name="left_knee{suffix}" pos="0 0 .02" range="-160 -2" stiffness="1" type="hinge"/>
                             <geom fromto="0 0 0 0 0 -.3" name="left_shin1{suffix}" size="0.049" type="capsule"/>
-                            <body name="left_foot{suffix}" pos="0 0 -0.45">
-                                <geom name="left_foot{suffix}" type="sphere" size="0.075" pos="0 0 0.1" user="0"/>
+                            <body name="left_foot{suffix}" pos="0 0 -0.35">
+                                <joint armature="0.01" axis="0 1 0" damping="8" name="left_ankle_y{suffix}" pos="0 0 0.05" range="-45 45" stiffness="20" type="hinge"/>
+                                <joint armature="0.008" axis="1 0 0" damping="5" name="left_ankle_x{suffix}" pos="0 0 0.05" range="-25 25" stiffness="15" type="hinge"/>
+                                <geom name="left_foot{suffix}" type="box" size="0.1 0.05 0.015" pos="0.03 0 0" condim="4" contype="1" conaffinity="1" friction="1.2 0.005 0.001" rgba="0.5 0.5 0.5 1"/>
                             </body>
                         </body>
                     </body>
@@ -217,7 +243,18 @@ class LabSimulation:
                 <body name="right_lower_arm{suffix}" pos=".18 -.18 -.18">
                     <joint armature="0.0028" axis="0 -1 1" name="right_elbow{suffix}" pos="0 0 0" range="-90 50" stiffness="0" type="hinge"/>
                     <geom fromto="0.01 0.01 0.01 .17 .17 .17" name="right_larm{suffix}" size="0.031" type="capsule"/>
-                    <geom name="right_hand{suffix}" pos=".18 .18 .18" size="0.04" type="sphere"/>
+                    <body name="right_gripper_base{suffix}" pos=".18 .18 .18">
+                        <site name="right_hand_site{suffix}" size="0.01" rgba="1 0 0 0.5"/>
+                        <geom name="right_palm{suffix}" type="box" size="0.025 0.03 0.015" mass="0.1" rgba="0.4 0.5 0.6 1"/>
+                        <body name="right_finger_l{suffix}" pos="0 -0.03 0.015">
+                            <joint name="right_gripper_l{suffix}" type="hinge" axis="0 -1 0" range="0 45" damping="0.5" armature="0.005" stiffness="0"/>
+                            <geom type="capsule" fromto="0 0 0 0 0 0.06" size="0.008" condim="4" contype="1" conaffinity="1" friction="1.5 0.005 0.001" rgba="0.5 0.6 0.7 1"/>
+                        </body>
+                        <body name="right_finger_r{suffix}" pos="0 0.03 0.015">
+                            <joint name="right_gripper_r{suffix}" type="hinge" axis="0 1 0" range="0 45" damping="0.5" armature="0.005" stiffness="0"/>
+                            <geom type="capsule" fromto="0 0 0 0 0 0.06" size="0.008" condim="4" contype="1" conaffinity="1" friction="1.5 0.005 0.001" rgba="0.5 0.6 0.7 1"/>
+                        </body>
+                    </body>
                 </body>
             </body>
             <body name="left_upper_arm{suffix}" pos="0 0.17 0.06">
@@ -227,7 +264,18 @@ class LabSimulation:
                 <body name="left_lower_arm{suffix}" pos=".18 .18 -.18">
                     <joint armature="0.0028" axis="0 -1 -1" name="left_elbow{suffix}" pos="0 0 0" range="-90 50" stiffness="0" type="hinge"/>
                     <geom fromto="0.01 -0.01 0.01 .17 -.17 .17" name="left_larm{suffix}" size="0.031" type="capsule"/>
-                    <geom name="left_hand{suffix}" pos=".18 -.18 .18" size="0.04" type="sphere"/>
+                    <body name="left_gripper_base{suffix}" pos=".18 -.18 .18">
+                        <site name="left_hand_site{suffix}" size="0.01" rgba="1 0 0 0.5"/>
+                        <geom name="left_palm{suffix}" type="box" size="0.025 0.03 0.015" mass="0.1" rgba="0.4 0.5 0.6 1"/>
+                        <body name="left_finger_l{suffix}" pos="0 0.03 0.015">
+                            <joint name="left_gripper_l{suffix}" type="hinge" axis="0 1 0" range="0 45" damping="0.5" armature="0.005" stiffness="0"/>
+                            <geom type="capsule" fromto="0 0 0 0 0 0.06" size="0.008" condim="4" contype="1" conaffinity="1" friction="1.5 0.005 0.001" rgba="0.5 0.6 0.7 1"/>
+                        </body>
+                        <body name="left_finger_r{suffix}" pos="0 -0.03 0.015">
+                            <joint name="left_gripper_r{suffix}" type="hinge" axis="0 -1 0" range="0 45" damping="0.5" armature="0.005" stiffness="0"/>
+                            <geom type="capsule" fromto="0 0 0 0 0 0.06" size="0.008" condim="4" contype="1" conaffinity="1" friction="1.5 0.005 0.001" rgba="0.5 0.6 0.7 1"/>
+                        </body>
+                    </body>
                 </body>
             </body>
         </body>"""
@@ -246,16 +294,18 @@ class LabSimulation:
         """Current simulation time in seconds."""
         return self.data.time
 
-    def step(self, actions: dict[str, np.ndarray], n_substeps: int = 7):
+    def step(self, actions: dict[str, np.ndarray], task_commands: dict[str, str] | None = None,
+             n_substeps: int = 7):
         """Advance physics by n_substeps to match real-time at 50 Hz control rate.
 
-        MuJoCo timestep is 0.003s. At 50 Hz control loop (0.02s per tick),
-        we need ~7 sub-steps per control tick to run physics in real-time.
-
         Args:
-            actions: dict mapping robot_id -> 17-dim action array
+            actions: dict mapping robot_id -> 25-dim action array
+            task_commands: dict mapping robot_id -> current command name (for task-conditional reward)
             n_substeps: number of mj_step calls per control tick (default: 7)
         """
+        if task_commands is None:
+            task_commands = {}
+
         # Apply actions to actuators (held constant across sub-steps)
         for robot in self.robots:
             rid = robot["id"]
@@ -270,7 +320,7 @@ class LabSimulation:
 
         dt = self.model.opt.timestep * n_substeps
 
-        # Compute reward and check for falls
+        # Compute task-conditional reward and check for falls
         for robot in self.robots:
             qs = robot["qpos_start"]
             vs = robot["qvel_start"]
@@ -278,22 +328,19 @@ class LabSimulation:
 
             height = self.data.qpos[qs + 2]
             x_pos = self.data.qpos[qs]
-
-            # Humanoid-v4 reward: forward velocity + alive bonus - control cost
-            forward_velocity = (x_pos - robot["prev_x"]) / dt if dt > 0 else 0.0
-            robot["prev_x"] = x_pos
+            cmd = task_commands.get(robot["id"], "idle")
 
             ctrl = self.data.ctrl[acts:acts + NUM_ACTUATORS]
             control_cost = 0.1 * float(np.sum(ctrl ** 2))
-            alive_bonus = 5.0 if height > 0.5 else 0.0
 
-            reward = forward_velocity + alive_bonus - control_cost
+            reward = self._compute_reward(robot, cmd, height, x_pos, dt, control_cost)
+            robot["prev_x"] = x_pos
             robot["reward_accum"] += reward
             robot["episode_steps"] += 1
             robot["total_steps"] += 1
 
             # Fall detection and reset
-            if height < 0.4:
+            if height < 0.3:
                 robot["fall_count"] += 1
                 robot["episode_count"] += 1
                 robot["total_reward"] += robot["reward_accum"]
@@ -309,6 +356,62 @@ class LabSimulation:
             elif robot["battery"] > 0.95:
                 robot["status"] = "active"
 
+    def _compute_reward(self, robot: dict, cmd: str, height: float,
+                        x_pos: float, dt: float, control_cost: float) -> float:
+        """Task-conditional reward.
+
+        Different commands get different reward signals:
+        - idle/stop: small penalty per step (no reward for doing nothing)
+        - walk/move: forward velocity reward
+        - reach/pick_up/grasp: negative distance from hand to target object
+        - wave/dance/bow/etc: small reward for staying upright during gesture
+        """
+        # Penalty for falling applies to all tasks
+        if height < 0.4:
+            return -10.0
+
+        if cmd in ("move", "move_relative", "walk"):
+            # Locomotion: reward forward movement
+            forward_vel = (x_pos - robot["prev_x"]) / dt if dt > 0 else 0.0
+            return forward_vel + 1.0 - control_cost  # reduced alive bonus (1.0 vs old 5.0)
+
+        if cmd in ("reach", "pick_up", "grasp"):
+            # Manipulation: reward hand-object proximity
+            hand_dist = self._hand_object_distance(robot)
+            if hand_dist is not None:
+                return -hand_dist - 0.1 * control_cost  # closer = better
+            return -1.0 - 0.1 * control_cost
+
+        if cmd in ("wave", "dance", "bow", "sit", "jump", "stretch", "look_around"):
+            # Gesture: small reward for staying upright, no free points
+            upright = 1.0 if height > 0.8 else 0.0
+            return upright * 0.5 - control_cost
+
+        if cmd in ("idle", "stop"):
+            # Idle: no reward. Robot should not be rewarded for standing still.
+            return -0.01 - 0.1 * control_cost
+
+        # Unknown command: small negative to discourage doing nothing
+        return -0.01 - control_cost
+
+    def _hand_object_distance(self, robot: dict) -> float | None:
+        """Distance from right hand site to nearest dynamic object site."""
+        try:
+            hand_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_SITE, "right_hand_site")
+            hand_pos = self.data.site_xpos[hand_id]
+
+            min_dist = float("inf")
+            for obj_name in ("red_box_site", "blue_cylinder_site"):
+                obj_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_SITE, obj_name)
+                if obj_id >= 0:
+                    obj_pos = self.data.site_xpos[obj_id]
+                    dist = float(np.linalg.norm(hand_pos - obj_pos))
+                    min_dist = min(min_dist, dist)
+
+            return min_dist if min_dist < float("inf") else None
+        except Exception:
+            return None
+
     def _reset_robot(self, robot: dict):
         """Reset a single robot to standing pose."""
         qpos_start = robot["qpos_start"]
@@ -320,7 +423,7 @@ class LabSimulation:
         self.data.qpos[qpos_start:qpos_start + BODY_QPOS_SIZE] = 0.0
         self.data.qpos[qpos_start + 0] = current_x  # keep x
         self.data.qpos[qpos_start + 1] = current_y  # keep y
-        self.data.qpos[qpos_start + 2] = 1.4         # standing height
+        self.data.qpos[qpos_start + 2] = 1.22        # standing height (feet at floor)
         self.data.qpos[qpos_start + 3] = 1.0         # quaternion w
         self.data.qvel[qvel_start:qvel_start + BODY_QVEL_SIZE] = 0.0
 
@@ -374,6 +477,26 @@ class LabSimulation:
                 "forward_velocity": round((self.data.qpos[robot["qpos_start"]] - robot["prev_x"]), 4),
             },
         }
+
+    def get_object_states(self) -> list[dict]:
+        """Get positions and velocities of dynamic objects (red_box, blue_cylinder)."""
+        objects = []
+        for name in ("red_box", "blue_cylinder"):
+            try:
+                bid = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_BODY, name)
+                if bid < 0:
+                    continue
+                pos = self.data.xpos[bid].copy()
+                # Velocity: use body com velocity if available
+                vel = self.data.cvel[bid][:3].copy() if bid < len(self.data.cvel) else np.zeros(3)
+                objects.append({
+                    "name": name,
+                    "pos_x": float(pos[0]), "pos_y": float(pos[1]), "pos_z": float(pos[2]),
+                    "vel_x": float(vel[0]), "vel_y": float(vel[1]), "vel_z": float(vel[2]),
+                })
+            except Exception:
+                pass
+        return objects
 
     def get_all_robot_ids(self) -> list[str]:
         return [r["id"] for r in self.robots]

@@ -94,7 +94,10 @@ func (s *robotService) RunInference(ctx context.Context, req InferenceRequest, t
 	// type directly so the robot runs its own time-varying action loop.
 	// For unknown instructions, send apply_actions with the predicted torques.
 	if req.RobotID != "" {
-		go s.forwardInferenceToRobot(context.Background(), req.RobotID, req.Instruction, body)
+		dispatchedCmd := s.forwardInferenceToRobot(ctx, req.RobotID, req.Instruction, body)
+		if dispatchedCmd != "" {
+			body = injectDispatchedCommand(body, dispatchedCmd)
+		}
 	}
 
 	return body, nil
@@ -104,7 +107,8 @@ func (s *robotService) RunInference(ctx context.Context, req InferenceRequest, t
 // When a Kafka command producer is available, it publishes a CommandMessage so the
 // processor picks it up and starts a Temporal workflow with full audit trail.
 // Falls back to direct Redis pub/sub when Kafka is unavailable.
-func (s *robotService) forwardInferenceToRobot(ctx context.Context, robotID, instruction string, inferenceBody []byte) {
+// Returns the dispatched command type so the caller can include it in the response.
+func (s *robotService) forwardInferenceToRobot(ctx context.Context, robotID, instruction string, inferenceBody []byte) string {
 	// Resolve command type: known locomotion command or apply_actions with torques
 	cmdType := command.MatchLocomotionCommand(instruction)
 	params := map[string]any{}
@@ -118,7 +122,7 @@ func (s *robotService) forwardInferenceToRobot(ctx context.Context, robotID, ins
 			} `json:"predicted_actions"`
 		}
 		if err := json.Unmarshal(inferenceBody, &result); err != nil || len(result.PredictedActions) == 0 {
-			return
+			return ""
 		}
 		actions := make([]map[string]any, 0, len(result.PredictedActions))
 		for _, a := range result.PredictedActions {
@@ -141,14 +145,14 @@ func (s *robotService) forwardInferenceToRobot(ctx context.Context, robotID, ins
 		data, err := json.Marshal(msg)
 		if err != nil {
 			slog.Error("failed to marshal command message", "error", err)
-			return
+			return ""
 		}
 		if err := s.commandProducer.Publish(robotID, data); err != nil {
 			slog.Error("failed to publish command to kafka", "robot", robotID, "error", err)
-		} else {
-			slog.Info("forwarded inference command via kafka", "robot", robotID, "command", cmdType)
+			return ""
 		}
-		return
+		slog.Info("forwarded inference command via kafka", "robot", robotID, "command", cmdType)
+		return cmdType
 	}
 
 	// Legacy fallback: direct Redis pub/sub
@@ -159,11 +163,27 @@ func (s *robotService) forwardInferenceToRobot(ctx context.Context, robotID, ins
 	})
 	if err != nil {
 		slog.Error("failed to marshal command", "error", err)
-		return
+		return ""
 	}
 	if err := s.cache.PublishEvent(ctx, "commands:"+robotID, cmdData); err != nil {
 		slog.Error("failed to publish command", "robot", robotID, "error", err)
-	} else {
-		slog.Info("forwarded inference command via redis", "robot", robotID, "command", cmdType)
+		return ""
 	}
+	slog.Info("forwarded inference command via redis", "robot", robotID, "command", cmdType)
+	return cmdType
+}
+
+// injectDispatchedCommand adds a "dispatched_command" field to the inference JSON response
+// so the caller knows exactly what command was dispatched without polling.
+func injectDispatchedCommand(body []byte, cmdType string) []byte {
+	var resp map[string]any
+	if err := json.Unmarshal(body, &resp); err != nil {
+		return body
+	}
+	resp["dispatched_command"] = cmdType
+	out, err := json.Marshal(resp)
+	if err != nil {
+		return body
+	}
+	return out
 }

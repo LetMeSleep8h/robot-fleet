@@ -10,10 +10,17 @@ import (
 	"github.com/dimuthu/robot-fleet/internal/store"
 )
 
+// ModelDeployer deploys a model and triggers any necessary pub/sub notifications.
+// This avoids a direct dependency on the service package (which imports temporal/workflows).
+type ModelDeployer interface {
+	DeployModel(ctx context.Context, id string) error
+}
+
 // DeploymentActivities holds dependencies for model deployment Temporal activities.
 type DeploymentActivities struct {
-	Models store.ModelRepository
-	Robots store.RobotRepository
+	Models       store.ModelRepository
+	Robots       store.RobotRepository
+	ModelService ModelDeployer
 }
 
 // StartCanaryOutput is returned by StartCanary.
@@ -154,8 +161,15 @@ func (a *DeploymentActivities) RollbackModel(ctx context.Context, input Rollback
 // FinalizeDeployment sets the canary to deployed, archives the baseline,
 // and assigns the model to all active robots.
 func (a *DeploymentActivities) FinalizeDeployment(ctx context.Context, input FinalizeInput) error {
-	if err := a.Models.UpdateModelStatus(ctx, input.ModelID, "deployed"); err != nil {
-		return fmt.Errorf("deploy model: %w", err)
+	// Use ModelService to trigger Redis pub/sub for inference hot-swap
+	if a.ModelService != nil {
+		if err := a.ModelService.DeployModel(ctx, input.ModelID); err != nil {
+			return fmt.Errorf("deploy model: %w", err)
+		}
+	} else {
+		if err := a.Models.UpdateModelStatus(ctx, input.ModelID, "deployed"); err != nil {
+			return fmt.Errorf("deploy model: %w", err)
+		}
 	}
 	if input.BaselineModelID != "" {
 		_ = a.Models.UpdateModelStatus(ctx, input.BaselineModelID, "archived")

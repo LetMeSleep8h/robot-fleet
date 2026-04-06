@@ -215,11 +215,13 @@ export function HumanoidRobot({ state, color }: Props) {
                 <sphereGeometry args={[0.03, 8, 8]} />
                 <meshStandardMaterial color={JOINT_COLOR} metalness={0.5} />
               </mesh>
-              {/* Right Foot */}
-              <mesh position={m(0, 0, -0.35)} castShadow>
-                <sphereGeometry args={[0.075, 12, 12]} />
-                <meshStandardMaterial color={bodyColor} />
-              </mesh>
+              {/* Right Foot (flat box with ankle) */}
+              <group position={m(0, 0, -0.35)}>
+                <mesh position={m(0.03, 0, 0)} castShadow>
+                  <boxGeometry args={[0.03, 0.2, 0.1]} />
+                  <meshStandardMaterial color={'#666'} metalness={0.4} roughness={0.6} />
+                </mesh>
+              </group>
             </group>
           </group>
 
@@ -238,11 +240,13 @@ export function HumanoidRobot({ state, color }: Props) {
                 <sphereGeometry args={[0.03, 8, 8]} />
                 <meshStandardMaterial color={JOINT_COLOR} metalness={0.5} />
               </mesh>
-              {/* Left Foot */}
-              <mesh position={m(0, 0, -0.35)} castShadow>
-                <sphereGeometry args={[0.075, 12, 12]} />
-                <meshStandardMaterial color={bodyColor} />
-              </mesh>
+              {/* Left Foot (flat box with ankle) */}
+              <group position={m(0, 0, -0.35)}>
+                <mesh position={m(0.03, 0, 0)} castShadow>
+                  <boxGeometry args={[0.03, 0.2, 0.1]} />
+                  <meshStandardMaterial color={'#666'} metalness={0.4} roughness={0.6} />
+                </mesh>
+              </group>
             </group>
           </group>
         </group>
@@ -259,11 +263,24 @@ export function HumanoidRobot({ state, color }: Props) {
         {/* Right Lower Arm */}
         <group ref={rlaRef} position={m(0.18, -0.18, -0.18)}>
           <Capsule from={[0.01, 0.01, 0.01]} to={[0.17, 0.17, 0.17]} radius={0.031} color={bodyColor} />
-          {/* Right Hand */}
-          <mesh position={m(0.18, 0.18, 0.18)}>
-            <sphereGeometry args={[0.04, 10, 10]} />
-            <meshStandardMaterial color={bodyColor} />
-          </mesh>
+          {/* Right Gripper */}
+          <group position={m(0.18, 0.18, 0.18)}>
+            {/* Palm */}
+            <mesh>
+              <boxGeometry args={[0.03, 0.05, 0.06]} />
+              <meshStandardMaterial color={'#667'} metalness={0.5} roughness={0.4} />
+            </mesh>
+            {/* Left finger */}
+            <mesh position={m(0, -0.025, 0.045)}>
+              <capsuleGeometry args={[0.008, 0.05, 4, 6]} />
+              <meshStandardMaterial color={'#778'} metalness={0.5} roughness={0.4} />
+            </mesh>
+            {/* Right finger */}
+            <mesh position={m(0, 0.025, 0.045)}>
+              <capsuleGeometry args={[0.008, 0.05, 4, 6]} />
+              <meshStandardMaterial color={'#778'} metalness={0.5} roughness={0.4} />
+            </mesh>
+          </group>
         </group>
       </group>
 
@@ -278,11 +295,24 @@ export function HumanoidRobot({ state, color }: Props) {
         {/* Left Lower Arm */}
         <group ref={llaRef} position={m(0.18, 0.18, -0.18)}>
           <Capsule from={[0.01, -0.01, 0.01]} to={[0.17, -0.17, 0.17]} radius={0.031} color={bodyColor} />
-          {/* Left Hand */}
-          <mesh position={m(0.18, -0.18, 0.18)}>
-            <sphereGeometry args={[0.04, 10, 10]} />
-            <meshStandardMaterial color={bodyColor} />
-          </mesh>
+          {/* Left Gripper */}
+          <group position={m(0.18, -0.18, 0.18)}>
+            {/* Palm */}
+            <mesh>
+              <boxGeometry args={[0.03, 0.05, 0.06]} />
+              <meshStandardMaterial color={'#667'} metalness={0.5} roughness={0.4} />
+            </mesh>
+            {/* Left finger */}
+            <mesh position={m(0, 0.025, 0.045)}>
+              <capsuleGeometry args={[0.008, 0.05, 4, 6]} />
+              <meshStandardMaterial color={'#778'} metalness={0.5} roughness={0.4} />
+            </mesh>
+            {/* Right finger */}
+            <mesh position={m(0, -0.025, 0.045)}>
+              <capsuleGeometry args={[0.008, 0.05, 4, 6]} />
+              <meshStandardMaterial color={'#778'} metalness={0.5} roughness={0.4} />
+            </mesh>
+          </group>
         </group>
       </group>
 

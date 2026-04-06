@@ -626,22 +626,162 @@ func (x *PerformanceMetrics) GetForwardVelocity() float64 {
 	return 0
 }
 
-type RobotState struct {
+// Training-relevant data embedded in telemetry for offline RL.
+// Sent alongside RobotState so the processor can write training-ready
+// transitions without a separate experience pipeline.
+type TrainingContext struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
-	RobotId       string                 `protobuf:"bytes,1,opt,name=robot_id,json=robotId,proto3" json:"robot_id,omitempty"`
-	Pose          *Pose                  `protobuf:"bytes,2,opt,name=pose,proto3" json:"pose,omitempty"`
-	Joints        []*JointState          `protobuf:"bytes,3,rep,name=joints,proto3" json:"joints,omitempty"`
-	BatteryLevel  float64                `protobuf:"fixed64,4,opt,name=battery_level,json=batteryLevel,proto3" json:"battery_level,omitempty"` // 0.0 - 1.0
-	Status        string                 `protobuf:"bytes,5,opt,name=status,proto3" json:"status,omitempty"`                                   // "idle", "active", "charging", "error"
-	Timestamp     *timestamppb.Timestamp `protobuf:"bytes,6,opt,name=timestamp,proto3" json:"timestamp,omitempty"`
-	Metrics       *PerformanceMetrics    `protobuf:"bytes,7,opt,name=metrics,proto3" json:"metrics,omitempty"` // model performance feedback for canary evaluation
+	ActionTaken   []float64              `protobuf:"fixed64,1,rep,packed,name=action_taken,json=actionTaken,proto3" json:"action_taken,omitempty"` // actuator commands this step (25-dim)
+	StepReward    float64                `protobuf:"fixed64,2,opt,name=step_reward,json=stepReward,proto3" json:"step_reward,omitempty"`           // task-conditional reward for this step
+	TaskCommand   string                 `protobuf:"bytes,3,opt,name=task_command,json=taskCommand,proto3" json:"task_command,omitempty"`          // current command: "idle", "walk", "reach", "pick_up", etc.
+	EpisodeDone   bool                   `protobuf:"varint,4,opt,name=episode_done,json=episodeDone,proto3" json:"episode_done,omitempty"`         // true if robot fell / episode terminated
+	Objects       []*ObjectState         `protobuf:"bytes,5,rep,name=objects,proto3" json:"objects,omitempty"`                                     // dynamic object positions for manipulation tasks
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
 
+func (x *TrainingContext) Reset() {
+	*x = TrainingContext{}
+	mi := &file_proto_telemetry_proto_msgTypes[9]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *TrainingContext) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*TrainingContext) ProtoMessage() {}
+
+func (x *TrainingContext) ProtoReflect() protoreflect.Message {
+	mi := &file_proto_telemetry_proto_msgTypes[9]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use TrainingContext.ProtoReflect.Descriptor instead.
+func (*TrainingContext) Descriptor() ([]byte, []int) {
+	return file_proto_telemetry_proto_rawDescGZIP(), []int{9}
+}
+
+func (x *TrainingContext) GetActionTaken() []float64 {
+	if x != nil {
+		return x.ActionTaken
+	}
+	return nil
+}
+
+func (x *TrainingContext) GetStepReward() float64 {
+	if x != nil {
+		return x.StepReward
+	}
+	return 0
+}
+
+func (x *TrainingContext) GetTaskCommand() string {
+	if x != nil {
+		return x.TaskCommand
+	}
+	return ""
+}
+
+func (x *TrainingContext) GetEpisodeDone() bool {
+	if x != nil {
+		return x.EpisodeDone
+	}
+	return false
+}
+
+func (x *TrainingContext) GetObjects() []*ObjectState {
+	if x != nil {
+		return x.Objects
+	}
+	return nil
+}
+
+type ObjectState struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Name          string                 `protobuf:"bytes,1,opt,name=name,proto3" json:"name,omitempty"` // "red_box", "blue_cylinder"
+	Position      *Vector3               `protobuf:"bytes,2,opt,name=position,proto3" json:"position,omitempty"`
+	Velocity      *Vector3               `protobuf:"bytes,3,opt,name=velocity,proto3" json:"velocity,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ObjectState) Reset() {
+	*x = ObjectState{}
+	mi := &file_proto_telemetry_proto_msgTypes[10]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ObjectState) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ObjectState) ProtoMessage() {}
+
+func (x *ObjectState) ProtoReflect() protoreflect.Message {
+	mi := &file_proto_telemetry_proto_msgTypes[10]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ObjectState.ProtoReflect.Descriptor instead.
+func (*ObjectState) Descriptor() ([]byte, []int) {
+	return file_proto_telemetry_proto_rawDescGZIP(), []int{10}
+}
+
+func (x *ObjectState) GetName() string {
+	if x != nil {
+		return x.Name
+	}
+	return ""
+}
+
+func (x *ObjectState) GetPosition() *Vector3 {
+	if x != nil {
+		return x.Position
+	}
+	return nil
+}
+
+func (x *ObjectState) GetVelocity() *Vector3 {
+	if x != nil {
+		return x.Velocity
+	}
+	return nil
+}
+
+type RobotState struct {
+	state           protoimpl.MessageState `protogen:"open.v1"`
+	RobotId         string                 `protobuf:"bytes,1,opt,name=robot_id,json=robotId,proto3" json:"robot_id,omitempty"`
+	Pose            *Pose                  `protobuf:"bytes,2,opt,name=pose,proto3" json:"pose,omitempty"`
+	Joints          []*JointState          `protobuf:"bytes,3,rep,name=joints,proto3" json:"joints,omitempty"`
+	BatteryLevel    float64                `protobuf:"fixed64,4,opt,name=battery_level,json=batteryLevel,proto3" json:"battery_level,omitempty"` // 0.0 - 1.0
+	Status          string                 `protobuf:"bytes,5,opt,name=status,proto3" json:"status,omitempty"`                                   // "idle", "active", "charging", "error"
+	Timestamp       *timestamppb.Timestamp `protobuf:"bytes,6,opt,name=timestamp,proto3" json:"timestamp,omitempty"`
+	Metrics         *PerformanceMetrics    `protobuf:"bytes,7,opt,name=metrics,proto3" json:"metrics,omitempty"`                                        // model performance feedback for canary evaluation
+	TrainingContext *TrainingContext       `protobuf:"bytes,8,opt,name=training_context,json=trainingContext,proto3" json:"training_context,omitempty"` // action, reward, task for offline RL
+	unknownFields   protoimpl.UnknownFields
+	sizeCache       protoimpl.SizeCache
+}
+
 func (x *RobotState) Reset() {
 	*x = RobotState{}
-	mi := &file_proto_telemetry_proto_msgTypes[9]
+	mi := &file_proto_telemetry_proto_msgTypes[11]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -653,7 +793,7 @@ func (x *RobotState) String() string {
 func (*RobotState) ProtoMessage() {}
 
 func (x *RobotState) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_telemetry_proto_msgTypes[9]
+	mi := &file_proto_telemetry_proto_msgTypes[11]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -666,7 +806,7 @@ func (x *RobotState) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RobotState.ProtoReflect.Descriptor instead.
 func (*RobotState) Descriptor() ([]byte, []int) {
-	return file_proto_telemetry_proto_rawDescGZIP(), []int{9}
+	return file_proto_telemetry_proto_rawDescGZIP(), []int{11}
 }
 
 func (x *RobotState) GetRobotId() string {
@@ -718,6 +858,13 @@ func (x *RobotState) GetMetrics() *PerformanceMetrics {
 	return nil
 }
 
+func (x *RobotState) GetTrainingContext() *TrainingContext {
+	if x != nil {
+		return x.TrainingContext
+	}
+	return nil
+}
+
 type TelemetryPacket struct {
 	state     protoimpl.MessageState `protogen:"open.v1"`
 	RobotId   string                 `protobuf:"bytes,1,opt,name=robot_id,json=robotId,proto3" json:"robot_id,omitempty"`
@@ -735,7 +882,7 @@ type TelemetryPacket struct {
 
 func (x *TelemetryPacket) Reset() {
 	*x = TelemetryPacket{}
-	mi := &file_proto_telemetry_proto_msgTypes[10]
+	mi := &file_proto_telemetry_proto_msgTypes[12]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -747,7 +894,7 @@ func (x *TelemetryPacket) String() string {
 func (*TelemetryPacket) ProtoMessage() {}
 
 func (x *TelemetryPacket) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_telemetry_proto_msgTypes[10]
+	mi := &file_proto_telemetry_proto_msgTypes[12]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -760,7 +907,7 @@ func (x *TelemetryPacket) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use TelemetryPacket.ProtoReflect.Descriptor instead.
 func (*TelemetryPacket) Descriptor() ([]byte, []int) {
-	return file_proto_telemetry_proto_rawDescGZIP(), []int{10}
+	return file_proto_telemetry_proto_rawDescGZIP(), []int{12}
 }
 
 func (x *TelemetryPacket) GetRobotId() string {
@@ -866,7 +1013,7 @@ type RobotCommand struct {
 
 func (x *RobotCommand) Reset() {
 	*x = RobotCommand{}
-	mi := &file_proto_telemetry_proto_msgTypes[11]
+	mi := &file_proto_telemetry_proto_msgTypes[13]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -878,7 +1025,7 @@ func (x *RobotCommand) String() string {
 func (*RobotCommand) ProtoMessage() {}
 
 func (x *RobotCommand) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_telemetry_proto_msgTypes[11]
+	mi := &file_proto_telemetry_proto_msgTypes[13]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -891,7 +1038,7 @@ func (x *RobotCommand) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RobotCommand.ProtoReflect.Descriptor instead.
 func (*RobotCommand) Descriptor() ([]byte, []int) {
-	return file_proto_telemetry_proto_rawDescGZIP(), []int{11}
+	return file_proto_telemetry_proto_rawDescGZIP(), []int{13}
 }
 
 func (x *RobotCommand) GetRobotId() string {
@@ -988,7 +1135,7 @@ type MoveCommand struct {
 
 func (x *MoveCommand) Reset() {
 	*x = MoveCommand{}
-	mi := &file_proto_telemetry_proto_msgTypes[12]
+	mi := &file_proto_telemetry_proto_msgTypes[14]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1000,7 +1147,7 @@ func (x *MoveCommand) String() string {
 func (*MoveCommand) ProtoMessage() {}
 
 func (x *MoveCommand) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_telemetry_proto_msgTypes[12]
+	mi := &file_proto_telemetry_proto_msgTypes[14]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1013,7 +1160,7 @@ func (x *MoveCommand) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use MoveCommand.ProtoReflect.Descriptor instead.
 func (*MoveCommand) Descriptor() ([]byte, []int) {
-	return file_proto_telemetry_proto_rawDescGZIP(), []int{12}
+	return file_proto_telemetry_proto_rawDescGZIP(), []int{14}
 }
 
 func (x *MoveCommand) GetTargetPosition() *Vector3 {
@@ -1040,7 +1187,7 @@ type JointCommand struct {
 
 func (x *JointCommand) Reset() {
 	*x = JointCommand{}
-	mi := &file_proto_telemetry_proto_msgTypes[13]
+	mi := &file_proto_telemetry_proto_msgTypes[15]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1052,7 +1199,7 @@ func (x *JointCommand) String() string {
 func (*JointCommand) ProtoMessage() {}
 
 func (x *JointCommand) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_telemetry_proto_msgTypes[13]
+	mi := &file_proto_telemetry_proto_msgTypes[15]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1065,7 +1212,7 @@ func (x *JointCommand) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use JointCommand.ProtoReflect.Descriptor instead.
 func (*JointCommand) Descriptor() ([]byte, []int) {
-	return file_proto_telemetry_proto_rawDescGZIP(), []int{13}
+	return file_proto_telemetry_proto_rawDescGZIP(), []int{15}
 }
 
 func (x *JointCommand) GetTargetJoints() []*JointState {
@@ -1091,7 +1238,7 @@ type StopCommand struct {
 
 func (x *StopCommand) Reset() {
 	*x = StopCommand{}
-	mi := &file_proto_telemetry_proto_msgTypes[14]
+	mi := &file_proto_telemetry_proto_msgTypes[16]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1103,7 +1250,7 @@ func (x *StopCommand) String() string {
 func (*StopCommand) ProtoMessage() {}
 
 func (x *StopCommand) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_telemetry_proto_msgTypes[14]
+	mi := &file_proto_telemetry_proto_msgTypes[16]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1116,7 +1263,7 @@ func (x *StopCommand) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use StopCommand.ProtoReflect.Descriptor instead.
 func (*StopCommand) Descriptor() ([]byte, []int) {
-	return file_proto_telemetry_proto_rawDescGZIP(), []int{14}
+	return file_proto_telemetry_proto_rawDescGZIP(), []int{16}
 }
 
 func (x *StopCommand) GetEmergency() bool {
@@ -1136,7 +1283,7 @@ type StreamAck struct {
 
 func (x *StreamAck) Reset() {
 	*x = StreamAck{}
-	mi := &file_proto_telemetry_proto_msgTypes[15]
+	mi := &file_proto_telemetry_proto_msgTypes[17]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1148,7 +1295,7 @@ func (x *StreamAck) String() string {
 func (*StreamAck) ProtoMessage() {}
 
 func (x *StreamAck) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_telemetry_proto_msgTypes[15]
+	mi := &file_proto_telemetry_proto_msgTypes[17]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1161,7 +1308,7 @@ func (x *StreamAck) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use StreamAck.ProtoReflect.Descriptor instead.
 func (*StreamAck) Descriptor() ([]byte, []int) {
-	return file_proto_telemetry_proto_rawDescGZIP(), []int{15}
+	return file_proto_telemetry_proto_rawDescGZIP(), []int{17}
 }
 
 func (x *StreamAck) GetMessageId() string {
@@ -1187,7 +1334,7 @@ type CommandRequest struct {
 
 func (x *CommandRequest) Reset() {
 	*x = CommandRequest{}
-	mi := &file_proto_telemetry_proto_msgTypes[16]
+	mi := &file_proto_telemetry_proto_msgTypes[18]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1199,7 +1346,7 @@ func (x *CommandRequest) String() string {
 func (*CommandRequest) ProtoMessage() {}
 
 func (x *CommandRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_telemetry_proto_msgTypes[16]
+	mi := &file_proto_telemetry_proto_msgTypes[18]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1212,7 +1359,7 @@ func (x *CommandRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CommandRequest.ProtoReflect.Descriptor instead.
 func (*CommandRequest) Descriptor() ([]byte, []int) {
-	return file_proto_telemetry_proto_rawDescGZIP(), []int{16}
+	return file_proto_telemetry_proto_rawDescGZIP(), []int{18}
 }
 
 func (x *CommandRequest) GetRobotId() string {
@@ -1278,7 +1425,18 @@ const file_proto_telemetry_proto_rawDesc = "" +
 	"\repisode_count\x18\x05 \x01(\x05R\fepisodeCount\x12\x1d\n" +
 	"\n" +
 	"uptime_pct\x18\x06 \x01(\x01R\tuptimePct\x12)\n" +
-	"\x10forward_velocity\x18\a \x01(\x01R\x0fforwardVelocity\"\xc3\x02\n" +
+	"\x10forward_velocity\x18\a \x01(\x01R\x0fforwardVelocity\"\xd5\x01\n" +
+	"\x0fTrainingContext\x12!\n" +
+	"\faction_taken\x18\x01 \x03(\x01R\vactionTaken\x12\x1f\n" +
+	"\vstep_reward\x18\x02 \x01(\x01R\n" +
+	"stepReward\x12!\n" +
+	"\ftask_command\x18\x03 \x01(\tR\vtaskCommand\x12!\n" +
+	"\fepisode_done\x18\x04 \x01(\bR\vepisodeDone\x128\n" +
+	"\aobjects\x18\x05 \x03(\v2\x1e.fleetos.telemetry.ObjectStateR\aobjects\"\x91\x01\n" +
+	"\vObjectState\x12\x12\n" +
+	"\x04name\x18\x01 \x01(\tR\x04name\x126\n" +
+	"\bposition\x18\x02 \x01(\v2\x1a.fleetos.telemetry.Vector3R\bposition\x126\n" +
+	"\bvelocity\x18\x03 \x01(\v2\x1a.fleetos.telemetry.Vector3R\bvelocity\"\x92\x03\n" +
 	"\n" +
 	"RobotState\x12\x19\n" +
 	"\brobot_id\x18\x01 \x01(\tR\arobotId\x12+\n" +
@@ -1287,7 +1445,8 @@ const file_proto_telemetry_proto_rawDesc = "" +
 	"\rbattery_level\x18\x04 \x01(\x01R\fbatteryLevel\x12\x16\n" +
 	"\x06status\x18\x05 \x01(\tR\x06status\x128\n" +
 	"\ttimestamp\x18\x06 \x01(\v2\x1a.google.protobuf.TimestampR\ttimestamp\x12?\n" +
-	"\ametrics\x18\a \x01(\v2%.fleetos.telemetry.PerformanceMetricsR\ametrics\"\xcc\x02\n" +
+	"\ametrics\x18\a \x01(\v2%.fleetos.telemetry.PerformanceMetricsR\ametrics\x12M\n" +
+	"\x10training_context\x18\b \x01(\v2\".fleetos.telemetry.TrainingContextR\x0ftrainingContext\"\xcc\x02\n" +
 	"\x0fTelemetryPacket\x12\x19\n" +
 	"\brobot_id\x18\x01 \x01(\tR\arobotId\x128\n" +
 	"\ttimestamp\x18\x02 \x01(\v2\x1a.google.protobuf.TimestampR\ttimestamp\x125\n" +
@@ -1336,7 +1495,7 @@ func file_proto_telemetry_proto_rawDescGZIP() []byte {
 	return file_proto_telemetry_proto_rawDescData
 }
 
-var file_proto_telemetry_proto_msgTypes = make([]protoimpl.MessageInfo, 17)
+var file_proto_telemetry_proto_msgTypes = make([]protoimpl.MessageInfo, 19)
 var file_proto_telemetry_proto_goTypes = []any{
 	(*Vector3)(nil),               // 0: fleetos.telemetry.Vector3
 	(*Quaternion)(nil),            // 1: fleetos.telemetry.Quaternion
@@ -1347,47 +1506,53 @@ var file_proto_telemetry_proto_goTypes = []any{
 	(*AudioChunk)(nil),            // 6: fleetos.telemetry.AudioChunk
 	(*Pose)(nil),                  // 7: fleetos.telemetry.Pose
 	(*PerformanceMetrics)(nil),    // 8: fleetos.telemetry.PerformanceMetrics
-	(*RobotState)(nil),            // 9: fleetos.telemetry.RobotState
-	(*TelemetryPacket)(nil),       // 10: fleetos.telemetry.TelemetryPacket
-	(*RobotCommand)(nil),          // 11: fleetos.telemetry.RobotCommand
-	(*MoveCommand)(nil),           // 12: fleetos.telemetry.MoveCommand
-	(*JointCommand)(nil),          // 13: fleetos.telemetry.JointCommand
-	(*StopCommand)(nil),           // 14: fleetos.telemetry.StopCommand
-	(*StreamAck)(nil),             // 15: fleetos.telemetry.StreamAck
-	(*CommandRequest)(nil),        // 16: fleetos.telemetry.CommandRequest
-	(*timestamppb.Timestamp)(nil), // 17: google.protobuf.Timestamp
+	(*TrainingContext)(nil),       // 9: fleetos.telemetry.TrainingContext
+	(*ObjectState)(nil),           // 10: fleetos.telemetry.ObjectState
+	(*RobotState)(nil),            // 11: fleetos.telemetry.RobotState
+	(*TelemetryPacket)(nil),       // 12: fleetos.telemetry.TelemetryPacket
+	(*RobotCommand)(nil),          // 13: fleetos.telemetry.RobotCommand
+	(*MoveCommand)(nil),           // 14: fleetos.telemetry.MoveCommand
+	(*JointCommand)(nil),          // 15: fleetos.telemetry.JointCommand
+	(*StopCommand)(nil),           // 16: fleetos.telemetry.StopCommand
+	(*StreamAck)(nil),             // 17: fleetos.telemetry.StreamAck
+	(*CommandRequest)(nil),        // 18: fleetos.telemetry.CommandRequest
+	(*timestamppb.Timestamp)(nil), // 19: google.protobuf.Timestamp
 }
 var file_proto_telemetry_proto_depIdxs = []int32{
 	3,  // 0: fleetos.telemetry.LidarScan.points:type_name -> fleetos.telemetry.LidarPoint
-	17, // 1: fleetos.telemetry.LidarScan.timestamp:type_name -> google.protobuf.Timestamp
-	17, // 2: fleetos.telemetry.VideoFrame.timestamp:type_name -> google.protobuf.Timestamp
-	17, // 3: fleetos.telemetry.AudioChunk.timestamp:type_name -> google.protobuf.Timestamp
+	19, // 1: fleetos.telemetry.LidarScan.timestamp:type_name -> google.protobuf.Timestamp
+	19, // 2: fleetos.telemetry.VideoFrame.timestamp:type_name -> google.protobuf.Timestamp
+	19, // 3: fleetos.telemetry.AudioChunk.timestamp:type_name -> google.protobuf.Timestamp
 	0,  // 4: fleetos.telemetry.Pose.position:type_name -> fleetos.telemetry.Vector3
 	1,  // 5: fleetos.telemetry.Pose.orientation:type_name -> fleetos.telemetry.Quaternion
-	7,  // 6: fleetos.telemetry.RobotState.pose:type_name -> fleetos.telemetry.Pose
-	2,  // 7: fleetos.telemetry.RobotState.joints:type_name -> fleetos.telemetry.JointState
-	17, // 8: fleetos.telemetry.RobotState.timestamp:type_name -> google.protobuf.Timestamp
-	8,  // 9: fleetos.telemetry.RobotState.metrics:type_name -> fleetos.telemetry.PerformanceMetrics
-	17, // 10: fleetos.telemetry.TelemetryPacket.timestamp:type_name -> google.protobuf.Timestamp
-	9,  // 11: fleetos.telemetry.TelemetryPacket.state:type_name -> fleetos.telemetry.RobotState
-	5,  // 12: fleetos.telemetry.TelemetryPacket.video:type_name -> fleetos.telemetry.VideoFrame
-	4,  // 13: fleetos.telemetry.TelemetryPacket.lidar:type_name -> fleetos.telemetry.LidarScan
-	6,  // 14: fleetos.telemetry.TelemetryPacket.audio:type_name -> fleetos.telemetry.AudioChunk
-	17, // 15: fleetos.telemetry.RobotCommand.timestamp:type_name -> google.protobuf.Timestamp
-	12, // 16: fleetos.telemetry.RobotCommand.move:type_name -> fleetos.telemetry.MoveCommand
-	13, // 17: fleetos.telemetry.RobotCommand.joint:type_name -> fleetos.telemetry.JointCommand
-	14, // 18: fleetos.telemetry.RobotCommand.stop:type_name -> fleetos.telemetry.StopCommand
-	0,  // 19: fleetos.telemetry.MoveCommand.target_position:type_name -> fleetos.telemetry.Vector3
-	2,  // 20: fleetos.telemetry.JointCommand.target_joints:type_name -> fleetos.telemetry.JointState
-	10, // 21: fleetos.telemetry.TelemetryService.StreamTelemetry:input_type -> fleetos.telemetry.TelemetryPacket
-	16, // 22: fleetos.telemetry.TelemetryService.StreamCommands:input_type -> fleetos.telemetry.CommandRequest
-	15, // 23: fleetos.telemetry.TelemetryService.StreamTelemetry:output_type -> fleetos.telemetry.StreamAck
-	11, // 24: fleetos.telemetry.TelemetryService.StreamCommands:output_type -> fleetos.telemetry.RobotCommand
-	23, // [23:25] is the sub-list for method output_type
-	21, // [21:23] is the sub-list for method input_type
-	21, // [21:21] is the sub-list for extension type_name
-	21, // [21:21] is the sub-list for extension extendee
-	0,  // [0:21] is the sub-list for field type_name
+	10, // 6: fleetos.telemetry.TrainingContext.objects:type_name -> fleetos.telemetry.ObjectState
+	0,  // 7: fleetos.telemetry.ObjectState.position:type_name -> fleetos.telemetry.Vector3
+	0,  // 8: fleetos.telemetry.ObjectState.velocity:type_name -> fleetos.telemetry.Vector3
+	7,  // 9: fleetos.telemetry.RobotState.pose:type_name -> fleetos.telemetry.Pose
+	2,  // 10: fleetos.telemetry.RobotState.joints:type_name -> fleetos.telemetry.JointState
+	19, // 11: fleetos.telemetry.RobotState.timestamp:type_name -> google.protobuf.Timestamp
+	8,  // 12: fleetos.telemetry.RobotState.metrics:type_name -> fleetos.telemetry.PerformanceMetrics
+	9,  // 13: fleetos.telemetry.RobotState.training_context:type_name -> fleetos.telemetry.TrainingContext
+	19, // 14: fleetos.telemetry.TelemetryPacket.timestamp:type_name -> google.protobuf.Timestamp
+	11, // 15: fleetos.telemetry.TelemetryPacket.state:type_name -> fleetos.telemetry.RobotState
+	5,  // 16: fleetos.telemetry.TelemetryPacket.video:type_name -> fleetos.telemetry.VideoFrame
+	4,  // 17: fleetos.telemetry.TelemetryPacket.lidar:type_name -> fleetos.telemetry.LidarScan
+	6,  // 18: fleetos.telemetry.TelemetryPacket.audio:type_name -> fleetos.telemetry.AudioChunk
+	19, // 19: fleetos.telemetry.RobotCommand.timestamp:type_name -> google.protobuf.Timestamp
+	14, // 20: fleetos.telemetry.RobotCommand.move:type_name -> fleetos.telemetry.MoveCommand
+	15, // 21: fleetos.telemetry.RobotCommand.joint:type_name -> fleetos.telemetry.JointCommand
+	16, // 22: fleetos.telemetry.RobotCommand.stop:type_name -> fleetos.telemetry.StopCommand
+	0,  // 23: fleetos.telemetry.MoveCommand.target_position:type_name -> fleetos.telemetry.Vector3
+	2,  // 24: fleetos.telemetry.JointCommand.target_joints:type_name -> fleetos.telemetry.JointState
+	12, // 25: fleetos.telemetry.TelemetryService.StreamTelemetry:input_type -> fleetos.telemetry.TelemetryPacket
+	18, // 26: fleetos.telemetry.TelemetryService.StreamCommands:input_type -> fleetos.telemetry.CommandRequest
+	17, // 27: fleetos.telemetry.TelemetryService.StreamTelemetry:output_type -> fleetos.telemetry.StreamAck
+	13, // 28: fleetos.telemetry.TelemetryService.StreamCommands:output_type -> fleetos.telemetry.RobotCommand
+	27, // [27:29] is the sub-list for method output_type
+	25, // [25:27] is the sub-list for method input_type
+	25, // [25:25] is the sub-list for extension type_name
+	25, // [25:25] is the sub-list for extension extendee
+	0,  // [0:25] is the sub-list for field type_name
 }
 
 func init() { file_proto_telemetry_proto_init() }
@@ -1395,13 +1560,13 @@ func file_proto_telemetry_proto_init() {
 	if File_proto_telemetry_proto != nil {
 		return
 	}
-	file_proto_telemetry_proto_msgTypes[10].OneofWrappers = []any{
+	file_proto_telemetry_proto_msgTypes[12].OneofWrappers = []any{
 		(*TelemetryPacket_State)(nil),
 		(*TelemetryPacket_Video)(nil),
 		(*TelemetryPacket_Lidar)(nil),
 		(*TelemetryPacket_Audio)(nil),
 	}
-	file_proto_telemetry_proto_msgTypes[11].OneofWrappers = []any{
+	file_proto_telemetry_proto_msgTypes[13].OneofWrappers = []any{
 		(*RobotCommand_Move)(nil),
 		(*RobotCommand_Joint)(nil),
 		(*RobotCommand_Stop)(nil),
@@ -1412,7 +1577,7 @@ func file_proto_telemetry_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_proto_telemetry_proto_rawDesc), len(file_proto_telemetry_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   17,
+			NumMessages:   19,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

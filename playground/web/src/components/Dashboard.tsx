@@ -178,11 +178,23 @@ function InferencePanel({ selectedRobot }: { selectedRobot: TelemetryEvent | nul
         };
         setSteps([...pipeline]);
 
-        // Now check command history to see if it was dispatched
-        pipeline[2] = { label: 'Command dispatched', status: 'active' };
+        // Use dispatched_command from inference response (set synchronously before response)
+        const dispatchedCmd = ir.dispatched_command as string | undefined;
+        const t2dispatch = performance.now();
+
+        if (dispatchedCmd) {
+          pipeline[2] = {
+            label: 'Command dispatched',
+            status: 'done',
+            detail: `type="${dispatchedCmd}"`,
+            time: Math.round(t2dispatch - t1),
+          };
+        } else {
+          pipeline[2] = { label: 'Command dispatched', status: 'active' };
+        }
         setSteps([...pipeline]);
 
-        // Poll command history for the dispatched command
+        // Poll command history for ack/timeout status
         let acked = false;
         for (let attempt = 0; attempt < 15; attempt++) {
           await new Promise(r => setTimeout(r, 500));
@@ -192,17 +204,18 @@ function InferencePanel({ selectedRobot }: { selectedRobot: TelemetryEvent | nul
             const recent = cmds[0];
             if (recent) {
               const status = recent.Status as string;
-              const cmdType = recent.CommandType as string;
+              const cmdType = (dispatchedCmd || recent.CommandType) as string;
               const t2 = performance.now();
 
               if (status === 'dispatched' || status === 'acked' || status === 'timeout') {
-                pipeline[2] = {
-                  label: 'Command dispatched',
-                  status: 'done',
-                  detail: `type="${cmdType}"`,
-                  time: Math.round(t2 - t1),
-                };
-                setSteps([...pipeline]);
+                if (!dispatchedCmd) {
+                  pipeline[2] = {
+                    label: 'Command dispatched',
+                    status: 'done',
+                    detail: `type="${cmdType}"`,
+                    time: Math.round(t2 - t1),
+                  };
+                }
 
                 if (status === 'acked') {
                   pipeline[3] = {

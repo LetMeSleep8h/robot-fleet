@@ -11,19 +11,19 @@ export default defineConfig({
     },
     proxy: {
       '/api/v1/ws': {
-        target: 'ws://api:8080',
+        target: process.env.VITE_WS_URL || 'ws://api:8080',
         ws: true,
       },
       '/api': {
-        target: 'http://api:8080',
+        target: process.env.VITE_API_URL || 'http://api:8080',
         changeOrigin: true,
       },
       '/healthz': {
-        target: 'http://api:8080',
+        target: process.env.VITE_API_URL || 'http://api:8080',
         changeOrigin: true,
       },
       '/simulator': {
-        target: 'http://simulator:8085',
+        target: process.env.VITE_SIM_URL || 'http://simulator:8085',
         changeOrigin: true,
         rewrite: (path) => path.replace(/^\/simulator/, ''),
       },

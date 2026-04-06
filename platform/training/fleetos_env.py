@@ -1,15 +1,10 @@
 """
 Custom Gymnasium environment wrapping our lab_room.xml MuJoCo model.
 
-Matches the Humanoid-v4 reward/observation structure but uses the actual
-lab environment that robots run in production. This ensures the trained
-policy works in the same physics conditions as deployment.
+Uses the unified 86-dim observation format (observation.py) and
+task-conditional reward matching the simulator.
 
-Key differences from stock Humanoid-v4:
-- Uses lab_room.xml (floor friction, walls, obstacles)
-- 7x sub-stepping (0.003s timestep × 7 = 0.021s per control step)
-- Same reward function as simulator: forward_vel + alive_bonus - control_cost
-- Registers as "FleetOS-Humanoid-v1" in Gymnasium
+Registers as "FleetOS-Humanoid-v2" in Gymnasium.
 """
 
 import os
@@ -21,23 +16,14 @@ import numpy as np
 from gymnasium import spaces
 from gymnasium.envs.registration import register
 
-# Paths
+from observation import build_observation_from_mujoco, OBS_DIM, NUM_ACTUATORS
+
 ASSETS_DIR = Path(__file__).parent / "assets"
 LAB_XML = ASSETS_DIR / "lab_room.xml"
 
-# Constants matching our simulator
-NUM_ACTUATORS = 17
-ROOT_QPOS = 7   # 3 pos + 4 quat
-ROOT_QVEL = 6   # 3 lin vel + 3 ang vel
-BODY_QPOS = ROOT_QPOS + NUM_ACTUATORS  # 24
-BODY_QVEL = ROOT_QVEL + NUM_ACTUATORS  # 23
-N_SUBSTEPS = 7  # matches simulator: 0.003s × 7 = 0.021s per step
-
-# Reward constants (matching simulator mujoco_env.py)
-ALIVE_BONUS = 5.0
+N_SUBSTEPS = 7  # 0.003s × 7 = 0.021s per step
 CTRL_COST_WEIGHT = 0.1
-HEALTHY_Z_MIN = 0.5
-FALL_Z = 0.4
+FALL_Z = 0.3
 
 
 class FleetOSHumanoidEnv(gym.Env):
@@ -57,100 +43,83 @@ class FleetOSHumanoidEnv(gym.Env):
         self._max_episode_steps = max_episode_steps
         self._step_count = 0
 
-        # Action space: 17 actuators, range [-1, 1] (motor ctrllimited in XML)
-        self.action_space = spaces.Box(
-            low=-1.0, high=1.0, shape=(NUM_ACTUATORS,), dtype=np.float32
-        )
+        # Find robot root joint (after dynamic object freejoints)
+        self._root_jnt_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_JOINT, "root")
+        self._root_qpos_adr = self.model.jnt_qposadr[self._root_jnt_id]
+        self._root_dof_adr = self.model.jnt_dofadr[self._root_jnt_id]
 
-        # Observation space: match Humanoid-v4 (376-dim)
-        # We build a similar observation from our model's state
-        obs_size = self._get_obs().shape[0]
+        # Action space: position targets for each actuator (from XML ctrl ranges)
+        low = self.model.actuator_ctrlrange[:, 0].astype(np.float32)
+        high = self.model.actuator_ctrlrange[:, 1].astype(np.float32)
+        self.action_space = spaces.Box(low=low, high=high, dtype=np.float32)
+
+        # Unified 86-dim observation
         self.observation_space = spaces.Box(
-            low=-np.inf, high=np.inf, shape=(obs_size,), dtype=np.float64
+            low=-np.inf, high=np.inf, shape=(OBS_DIM,), dtype=np.float32
         )
 
         self._prev_x = 0.0
 
     def _get_obs(self) -> np.ndarray:
-        """Build observation vector from MuJoCo state.
-
-        Structure (matching Humanoid-v4 for policy compatibility):
-        - qpos[2:] (exclude x, y — agent shouldn't know absolute position) — 22 dims
-        - qvel (full) — 23 dims
-        - cinert (body inertias flattened) — variable
-        - cvel (body velocities flattened) — variable
-        - qfrc_actuator — 23 dims
-        - cfrc_ext (external forces) — variable
-        """
-        position = self.data.qpos[2:].flat.copy()
-        velocity = self.data.qvel.flat.copy()
-        com_inertia = self.data.cinert[1:].flat.copy()
-        com_velocity = self.data.cvel[1:].flat.copy()
-        actuator_forces = self.data.qfrc_actuator.flat.copy()
-        external_forces = self.data.cfrc_ext[1:].flat.copy()
-
-        return np.concatenate([
-            position, velocity,
-            com_inertia, com_velocity,
-            actuator_forces, external_forces,
-        ])
+        """Build unified 86-dim observation from MuJoCo state."""
+        return build_observation_from_mujoco(
+            self.model, self.data,
+            self._root_qpos_adr, self._root_dof_adr,
+            task_command="walk",
+        )
 
     def reset(self, *, seed=None, options=None):
         super().reset(seed=seed)
         mujoco.mj_resetData(self.model, self.data)
 
-        # Standing pose at origin
-        self.data.qpos[2] = 1.4  # standing height
-        self.data.qpos[3] = 1.0  # quaternion w (upright)
+        qs = self._root_qpos_adr
+        self.data.qpos[qs + 2] = 1.22  # standing height
+        self.data.qpos[qs + 3] = 1.0   # quaternion w (upright)
 
-        # Small noise for exploration
-        noise = self.np_random.uniform(low=-0.005, high=0.005, size=self.model.nq)
-        noise[:3] = 0  # don't perturb position
-        noise[3:7] = 0  # don't perturb quaternion
-        self.data.qpos[:] += noise[:self.model.nq]
-
-        vel_noise = self.np_random.uniform(low=-0.005, high=0.005, size=self.model.nv)
-        self.data.qvel[:] = vel_noise[:self.model.nv]
+        # Small noise on joints only
+        joint_start = qs + 7
+        joint_end = joint_start + NUM_ACTUATORS
+        noise = self.np_random.uniform(-0.01, 0.01, size=NUM_ACTUATORS)
+        self.data.qpos[joint_start:joint_end] += noise
 
         mujoco.mj_forward(self.model, self.data)
 
-        self._prev_x = self.data.qpos[0]
+        self._prev_x = self.data.qpos[qs]
         self._step_count = 0
 
         return self._get_obs(), {}
 
     def step(self, action):
-        action = np.clip(action, -1.0, 1.0)
+        action = np.clip(action, self.action_space.low, self.action_space.high)
         self.data.ctrl[:NUM_ACTUATORS] = action
 
-        # Sub-step to match simulator real-time physics
         for _ in range(N_SUBSTEPS):
             mujoco.mj_step(self.model, self.data)
 
         self._step_count += 1
 
         obs = self._get_obs()
-        height = self.data.qpos[2]
-        x_pos = self.data.qpos[0]
+        qs = self._root_qpos_adr
+        height = self.data.qpos[qs + 2]
+        x_pos = self.data.qpos[qs]
 
-        # Reward: same as simulator
+        # Locomotion reward (matches simulator task-conditional reward for "walk")
         dt = self.model.opt.timestep * N_SUBSTEPS
         forward_velocity = (x_pos - self._prev_x) / dt
         self._prev_x = x_pos
 
-        ctrl_cost = CTRL_COST_WEIGHT * np.sum(action ** 2)
-        alive_bonus = ALIVE_BONUS if height > HEALTHY_Z_MIN else 0.0
+        ctrl_cost = CTRL_COST_WEIGHT * float(np.sum(action ** 2))
 
-        reward = forward_velocity + alive_bonus - ctrl_cost
+        if height < FALL_Z:
+            reward = -10.0
+        else:
+            reward = forward_velocity + 1.0 - ctrl_cost
 
-        # Termination
-        fallen = height < FALL_Z
+        terminated = height < FALL_Z
         truncated = self._step_count >= self._max_episode_steps
-        terminated = fallen
 
         info = {
             "reward_forward": forward_velocity,
-            "reward_alive": alive_bonus,
             "reward_ctrl": -ctrl_cost,
             "height": height,
             "x_position": x_pos,
@@ -172,7 +141,7 @@ class FleetOSHumanoidEnv(gym.Env):
 def register_fleetos_env():
     """Register the FleetOS Humanoid environment with Gymnasium."""
     register(
-        id="FleetOS-Humanoid-v1",
+        id="FleetOS-Humanoid-v2",
         entry_point="fleetos_env:FleetOSHumanoidEnv",
         max_episode_steps=1000,
     )

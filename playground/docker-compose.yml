@@ -8,6 +8,7 @@ services:
     environment:
       ROBOT_ID: "robot-0001"
       GRPC_TARGET: "host.docker.internal:30051"
+      INFERENCE_URL: "http://host.docker.internal:30081"
       SIM_STEP_HZ: "50"
       TELEMETRY_HZ: "10"
       FRAME_PORT: "8085"

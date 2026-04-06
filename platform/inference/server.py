@@ -44,16 +44,18 @@ HUMANOID_JOINTS = [
     "left_ankle_pitch", "left_ankle_roll",
     "right_hip_yaw", "right_hip_roll", "right_hip_pitch", "right_knee",
     "right_ankle_pitch", "right_ankle_roll",
+    "right_gripper_left", "right_gripper_right",
+    "left_gripper_left", "left_gripper_right",
 ]
 
-# MuJoCo Humanoid-v4 has 17 actuators; our schema has 20 (4 ankles unmapped)
-MUJOCO_ACTION_DIM = 17
-FLEET_ACTION_DIM = len(HUMANOID_JOINTS)  # 20
+# MuJoCo humanoid has 25 actuators (17 body + 4 ankle + 4 gripper)
+MUJOCO_ACTION_DIM = 25
+FLEET_ACTION_DIM = len(HUMANOID_JOINTS)  # 24
 
 # Maps MuJoCo actuator index → HUMANOID_JOINTS index
 MUJOCO_TO_FLEET = {
-    0: 0,    # abdomen_z → head_pan
-    1: 1,    # abdomen_y → head_tilt
+    0: 0,    # abdomen_y → head_pan
+    1: 1,    # abdomen_z → head_tilt
     # 2: abdomen_x → no mapping
     3: 15,   # right_hip_x → right_hip_roll
     4: 14,   # right_hip_z → right_hip_yaw
@@ -69,6 +71,14 @@ MUJOCO_TO_FLEET = {
     14: 2,   # left_shoulder1 → left_shoulder_pitch
     15: 3,   # left_shoulder2 → left_shoulder_roll
     16: 4,   # left_elbow → left_elbow
+    17: 18,  # right_ankle_y → right_ankle_pitch
+    18: 19,  # right_ankle_x → right_ankle_roll  (note: swapped with left in FLEET schema)
+    19: 12,  # left_ankle_y → left_ankle_pitch
+    20: 13,  # left_ankle_x → left_ankle_roll
+    21: 20,  # right_gripper_l → right_gripper_left
+    22: 21,  # right_gripper_r → right_gripper_right
+    23: 22,  # left_gripper_l → left_gripper_left
+    24: 23,  # left_gripper_r → left_gripper_right
 }
 
 MODEL_DIR = Path(os.environ.get("MODEL_DIR", "/tmp/fleetos-models"))
@@ -79,8 +89,10 @@ S3_ACCESS_KEY = os.environ.get("S3_ACCESS_KEY", "fleetos")
 S3_SECRET_KEY = os.environ.get("S3_SECRET_KEY", "fleetos123")
 S3_MODEL_PREFIX = os.environ.get("S3_MODEL_PREFIX", "models/humanoid-v4-ppo")
 
-# MuJoCo Humanoid-v4 observation dimension
-OBS_DIM = 376
+# Unified observation dimension (from observation.py)
+OBS_DIM = 86
+# Also accept legacy 376-dim for backward compatibility
+LEGACY_OBS_DIM = 376
 
 logging.basicConfig(
     level=logging.INFO,
@@ -442,14 +454,14 @@ def load_model(artifact_url: str = ""):
 
 
 def get_default_observation() -> np.ndarray:
-    """Generate a default standing observation for Humanoid-v4.
+    """Generate a default standing observation (unified 86-dim format).
 
-    The observation space is 376-dim: body positions, velocities,
-    center of mass info, and external forces. We use a neutral
-    standing pose with small noise for realism.
+    Components: joint_pos(25) + joint_vel(25) + root_quat(4) + root_linvel(3) +
+    root_angvel(3) + hand_right(3) + hand_left(3) + gripper(4) + obj_pos(6) +
+    obj_vel(6) + task_encoding(4) = 86
     """
     obs = np.zeros(OBS_DIM, dtype=np.float32)
-    # Minimal standing pose hints:
+    # Standing pose: root quaternion w=1 (upright)
     # qpos-derived features occupy roughly the first ~45 dims.
     # Set a small upright z-height signal and zero everything else.
     obs[0] = 1.25   # approximate z-height of standing humanoid
@@ -557,9 +569,12 @@ def run_inference(observation: list | None, instruction: str, model_id: str, emb
     log.info("  Observation: %s", f"{len(observation)}-dim" if observation else "default standing pose")
     log.info("-" * 60)
 
-    # Build observation
-    if observation and len(observation) == OBS_DIM:
+    # Build observation — accept both unified (86-dim) and legacy (376-dim)
+    if observation and len(observation) in (OBS_DIM, LEGACY_OBS_DIM):
         obs = np.array(observation, dtype=np.float32)
+        # If legacy 376-dim, pad/truncate to OBS_DIM for new policies
+        if len(obs) == LEGACY_OBS_DIM and len(obs) != OBS_DIM:
+            obs = obs[:OBS_DIM] if LEGACY_OBS_DIM > OBS_DIM else np.pad(obs, (0, OBS_DIM - len(obs)))
     else:
         obs = get_default_observation()
 
@@ -587,10 +602,12 @@ def run_inference(observation: list | None, instruction: str, model_id: str, emb
 
     return {
         "predicted_actions": predicted_actions,
+        "action": biased_action.tolist(),  # flat 25-dim array for simulator
         "confidence": 0.85,
         "model_id": model_id,
         "model_version": model_version,
         "embodiment": embodiment,
+        "task_type": instruction,
         "action_dim": MUJOCO_ACTION_DIM,
         "latency_ms": round(total_ms, 1),
     }

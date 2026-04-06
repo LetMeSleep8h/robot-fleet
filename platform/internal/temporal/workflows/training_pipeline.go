@@ -13,12 +13,13 @@ import (
 // TrainingPipelineInput is the input for TrainingPipelineWorkflow.
 type TrainingPipelineInput struct {
 	JobID          string `json:"job_id"`
-	Timesteps      int    `json:"timesteps"`       // default: 2000000
-	EnvID          string `json:"env_id"`           // default: FleetOS-Humanoid-v1
-	UseKatib       bool   `json:"use_katib"`        // HPO via Katib
-	AutoDeploy     bool   `json:"auto_deploy"`      // auto canary deploy if evaluation passes
-	BaseModel      string `json:"base_model"`       // S3 key for fine-tuning, empty = from scratch
-	FromExperience bool   `json:"from_experience"`  // include collected experience
+	Timesteps      int    `json:"timesteps"`        // default: 2000000
+	EnvID          string `json:"env_id"`            // default: FleetOS-Humanoid-v1
+	TaskType       string `json:"task_type"`         // "locomotion" or "reach"
+	UseKatib       bool   `json:"use_katib"`         // HPO via Katib
+	AutoDeploy     bool   `json:"auto_deploy"`       // auto canary deploy if evaluation passes
+	BaseModel      string `json:"base_model"`        // S3 key for fine-tuning, empty = from scratch
+	FromExperience bool   `json:"from_experience"`   // include collected experience
 }
 
 // TrainingPipelineResult is the output of TrainingPipelineWorkflow.
@@ -49,6 +50,24 @@ func TrainingPipelineWorkflow(ctx workflow.Context, input TrainingPipelineInput)
 	if input.EnvID == "" {
 		input.EnvID = "FleetOS-Humanoid-v1"
 	}
+	if input.TaskType == "" {
+		input.TaskType = "locomotion"
+	}
+
+	algorithm := "ppo"
+	switch input.TaskType {
+	case "reach":
+		algorithm = "sac"
+	case "grasp":
+		algorithm = "sac"
+	case "offline":
+		algorithm = "cql"
+	case "bc":
+		algorithm = "bc"
+	case "autoencoder":
+		algorithm = "autoencoder"
+	}
+
 	if input.JobID == "" {
 		input.JobID = fmt.Sprintf("train-%d", workflow.Now(ctx).UnixNano())
 	}
@@ -99,6 +118,8 @@ func TrainingPipelineWorkflow(ctx workflow.Context, input TrainingPipelineInput)
 		BaseModel:      baseModel,
 		FromExperience: experiencePrefix,
 		UseKatib:       input.UseKatib,
+		TaskType:       input.TaskType,
+		Algorithm:      algorithm,
 	}).Get(ctx, &trainResult)
 	if err != nil {
 		result.Phase = "failed"
@@ -136,12 +157,27 @@ func TrainingPipelineWorkflow(ctx workflow.Context, input TrainingPipelineInput)
 	// Step 5: Register model in registry
 	var modelID string
 	version := fmt.Sprintf("v%d", workflow.Now(ctx).Unix())
+	name := "ppo-lab"
+	switch input.TaskType {
+	case "reach":
+		name = "sac-reach"
+	case "grasp":
+		name = "sac-grasp"
+	case "offline":
+		name = "cql-offline"
+	case "bc":
+		name = "bc-pretrain"
+	case "autoencoder":
+		name = "autoencoder"
+	}
 	err = workflow.ExecuteActivity(actCtx, "RegisterTrainedModel", activities.RegisterTrainedModelInput{
-		Name:        "ppo-lab",
+		Name:        name,
 		Version:     version,
 		ArtifactURL: trainResult.ModelPath,
 		MeanReward:  evalResult.MeanReward,
 		Environment: input.EnvID,
+		TaskType:    input.TaskType,
+		Algorithm:   algorithm,
 	}).Get(ctx, &modelID)
 	if err != nil {
 		result.Phase = "failed"
