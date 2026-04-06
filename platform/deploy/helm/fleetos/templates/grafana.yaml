@@ -52,54 +52,92 @@ data:
           "type": "stat",
           "datasource": "Prometheus",
           "targets": [{"expr": "fleetos_robots_active", "legendFormat": "Active"}],
-          "gridPos": {"h": 4, "w": 6, "x": 0, "y": 0}
+          "gridPos": {"h": 4, "w": 6, "x": 0, "y": 0},
+          "fieldConfig": {"defaults": {"color": {"mode": "thresholds"}, "thresholds": {"steps": [{"color": "green", "value": null}]}}}
         },
         {
-          "title": "API Request Rate",
-          "type": "timeseries",
-          "datasource": "Prometheus",
-          "targets": [{"expr": "rate(fleetos_http_requests_total[5m])", "legendFormat": "{{ "{{" }}method{{ "}}" }} {{ "{{" }}path{{ "}}" }}"}],
-          "gridPos": {"h": 8, "w": 12, "x": 0, "y": 4}
-        },
-        {
-          "title": "Telemetry Ingestion Rate",
-          "type": "timeseries",
-          "datasource": "Prometheus",
-          "targets": [{"expr": "rate(fleetos_telemetry_packets_total[5m])", "legendFormat": "packets/s"}],
-          "gridPos": {"h": 8, "w": 12, "x": 12, "y": 4}
-        },
-        {
-          "title": "Inference Latency (p95)",
-          "type": "timeseries",
-          "datasource": "Prometheus",
-          "targets": [{"expr": "histogram_quantile(0.95, rate(fleetos_inference_duration_seconds_bucket[5m]))", "legendFormat": "p95"}],
-          "gridPos": {"h": 8, "w": 12, "x": 0, "y": 12}
-        },
-        {
-          "title": "gRPC Active Streams",
+          "title": "Total Robots",
           "type": "stat",
           "datasource": "Prometheus",
-          "targets": [{"expr": "fleetos_grpc_active_streams", "legendFormat": "Streams"}],
-          "gridPos": {"h": 4, "w": 6, "x": 6, "y": 0}
+          "targets": [{"expr": "fleetos_robots_total", "legendFormat": "Total"}],
+          "gridPos": {"h": 4, "w": 6, "x": 6, "y": 0},
+          "fieldConfig": {"defaults": {"color": {"mode": "thresholds"}, "thresholds": {"steps": [{"color": "blue", "value": null}]}}}
         },
         {
           "title": "WebSocket Connections",
           "type": "stat",
           "datasource": "Prometheus",
           "targets": [{"expr": "fleetos_websocket_connections", "legendFormat": "WS"}],
-          "gridPos": {"h": 4, "w": 6, "x": 12, "y": 0}
+          "gridPos": {"h": 4, "w": 6, "x": 12, "y": 0},
+          "fieldConfig": {"defaults": {"color": {"mode": "thresholds"}, "thresholds": {"steps": [{"color": "purple", "value": null}]}}}
         },
         {
-          "title": "Error Rate (5xx)",
+          "title": "Avg Battery Level",
+          "type": "gauge",
+          "datasource": "Prometheus",
+          "targets": [{"expr": "fleetos_avg_battery_level", "legendFormat": "Battery"}],
+          "gridPos": {"h": 4, "w": 6, "x": 18, "y": 0},
+          "fieldConfig": {"defaults": {"min": 0, "max": 1, "unit": "percentunit", "thresholds": {"steps": [{"color": "red", "value": null}, {"color": "yellow", "value": 0.2}, {"color": "green", "value": 0.5}]}}}
+        },
+        {
+          "title": "API Request Rate",
           "type": "timeseries",
           "datasource": "Prometheus",
-          "targets": [{"expr": "rate(fleetos_http_requests_total{status=~\"5..\"}[5m])", "legendFormat": "5xx/s"}],
+          "targets": [
+            {"expr": "sum(rate(fleetos_api_requests_total[1m]))", "legendFormat": "total req/s"},
+            {"expr": "sum(rate(fleetos_api_requests_total[1m])) by (method)", "legendFormat": "{{ "{{" }}method{{ "}}" }}"}
+          ],
+          "gridPos": {"h": 8, "w": 12, "x": 0, "y": 4}
+        },
+        {
+          "title": "Telemetry Ingestion Rate",
+          "type": "timeseries",
+          "datasource": "Prometheus",
+          "targets": [{"expr": "rate(fleetos_telemetry_packets_total[1m])", "legendFormat": "packets/s"}],
+          "gridPos": {"h": 8, "w": 12, "x": 12, "y": 4}
+        },
+        {
+          "title": "Inference Latency",
+          "type": "timeseries",
+          "datasource": "Prometheus",
+          "targets": [
+            {"expr": "histogram_quantile(0.95, sum(rate(fleetos_inference_duration_seconds_bucket[1m])) by (le))", "legendFormat": "p95"},
+            {"expr": "histogram_quantile(0.50, sum(rate(fleetos_inference_duration_seconds_bucket[1m])) by (le))", "legendFormat": "p50"},
+            {"expr": "rate(fleetos_inference_duration_seconds_sum[1m]) / rate(fleetos_inference_duration_seconds_count[1m])", "legendFormat": "avg"}
+          ],
+          "fieldConfig": {"defaults": {"unit": "s"}},
+          "gridPos": {"h": 8, "w": 12, "x": 0, "y": 12}
+        },
+        {
+          "title": "API Latency (p95)",
+          "type": "timeseries",
+          "datasource": "Prometheus",
+          "targets": [
+            {"expr": "histogram_quantile(0.95, sum(rate(fleetos_api_request_duration_seconds_bucket[1m])) by (le))", "legendFormat": "p95"},
+            {"expr": "histogram_quantile(0.50, sum(rate(fleetos_api_request_duration_seconds_bucket[1m])) by (le))", "legendFormat": "p50"}
+          ],
+          "fieldConfig": {"defaults": {"unit": "s"}},
           "gridPos": {"h": 8, "w": 12, "x": 12, "y": 12}
+        },
+        {
+          "title": "Kafka Consumer Lag",
+          "type": "timeseries",
+          "datasource": "Prometheus",
+          "targets": [{"expr": "fleetos_kafka_consumer_lag", "legendFormat": "{{ "{{" }}group{{ "}}" }}"}],
+          "gridPos": {"h": 8, "w": 12, "x": 0, "y": 20}
+        },
+        {
+          "title": "Robot Battery Levels",
+          "type": "timeseries",
+          "datasource": "Prometheus",
+          "targets": [{"expr": "fleetos_robot_battery_level", "legendFormat": "{{ "{{" }}robot_id{{ "}}" }}"}],
+          "fieldConfig": {"defaults": {"min": 0, "max": 1, "unit": "percentunit"}},
+          "gridPos": {"h": 8, "w": 12, "x": 12, "y": 20}
         }
       ],
       "schemaVersion": 39,
-      "time": {"from": "now-1h", "to": "now"},
-      "refresh": "10s"
+      "time": {"from": "now-15m", "to": "now"},
+      "refresh": "5s"
     }
 ---
 apiVersion: apps/v1

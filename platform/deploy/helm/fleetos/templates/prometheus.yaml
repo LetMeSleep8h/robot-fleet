@@ -19,17 +19,10 @@ data:
         metrics_path: /metrics
         static_configs:
           - targets: ['{{ .Release.Name }}-api:{{ .Values.api.service.port }}']
-      - job_name: fleetos-ingestion
-        static_configs:
-          - targets: ['{{ .Release.Name }}-ingestion:9090']
       - job_name: fleetos-processor
         metrics_path: /metrics
         static_configs:
           - targets: ['{{ .Release.Name }}-processor:9090']
-      - job_name: fleetos-inference
-        metrics_path: /metrics
-        static_configs:
-          - targets: ['{{ .Release.Name }}-inference:{{ .Values.inference.service.port }}']
   alerts.yml: |
     groups:
       - name: fleet_health
