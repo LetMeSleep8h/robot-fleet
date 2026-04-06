@@ -165,7 +165,7 @@ inference:
 
 # --- Playground ---
 simulator:
-  enabled: true
+  enabled: false
   replicaCount: 1
   service:
     type: NodePort
@@ -180,7 +180,7 @@ simulator:
       memory: 256Mi
 
 web:
-  enabled: true
+  enabled: false
   replicaCount: 1
   # Vite dev server proxy targets (in-cluster DNS, used server-side by Vite)
   apiUrl: "http://fleetos-platform-api:8080"

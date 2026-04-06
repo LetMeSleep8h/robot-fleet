@@ -1,17 +1,3 @@
-version: "3.9"
-
-# Playground stack: robot simulator (like a real robot fleet)
-# Connects to the platform stack via shared Docker network.
-# The robot only sends telemetry (gRPC) and receives commands (gRPC).
-# All reasoning (inference, model management) happens in the platform.
-#
-# Usage:
-#   1. Start platform first:  cd ../platform && docker compose up -d
-#   2. Start playground:      docker compose up -d
-#
-# Or run standalone (simulator streams to a local gRPC target):
-#   GRPC_TARGET=host.docker.internal:50051 docker compose up simulator
-
 services:
   simulator:
     build:
@@ -21,16 +7,16 @@ services:
       - "8085:8085"
     environment:
       ROBOT_ID: "robot-0001"
-      GRPC_TARGET: "ingestion:50051"
+      GRPC_TARGET: "host.docker.internal:30051"
       SIM_STEP_HZ: "50"
       TELEMETRY_HZ: "10"
       FRAME_PORT: "8085"
-      S3_ENDPOINT: "minio:9000"
+      S3_ENDPOINT: "host.docker.internal:9000"
       S3_BUCKET: "fleetos-models"
       S3_ACCESS_KEY: "fleetos"
       S3_SECRET_KEY: "fleetos123"
-    networks:
-      - fleetos-net
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     restart: unless-stopped
 
   web:
@@ -39,8 +25,12 @@ services:
       dockerfile: deploy/Dockerfile.web
     ports:
       - "5173:5173"
-    networks:
-      - fleetos-net
+    environment:
+      VITE_API_URL: "http://host.docker.internal:30880"
+      VITE_WS_URL: "ws://host.docker.internal:30880"
+      VITE_SIM_URL: "http://host.docker.internal:8085"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     restart: unless-stopped
 
   ros2-bridge:
@@ -49,11 +39,4 @@ services:
       dockerfile: Dockerfile
     environment:
       ROS_DOMAIN_ID: "0"
-    networks:
-      - fleetos-net
     restart: unless-stopped
-
-networks:
-  fleetos-net:
-    external: true
-    name: platform_default
