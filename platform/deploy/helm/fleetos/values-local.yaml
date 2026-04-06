@@ -14,9 +14,14 @@ secrets:
   jwt:
     secret: dev-secret-change-me
 
-# --- Infrastructure (Bitnami subcharts — minimal resources) ---
+# --- Infrastructure ---
+# Bitnami subcharts for postgresql and redis (their :latest tags exist).
+# Kafka and MinIO subcharts are disabled because Bitnami removed those tags
+# from Docker Hub. We deploy them via custom templates instead.
 postgresql:
   enabled: true
+  image:
+    tag: latest
   auth:
     username: fleetos
     password: fleetos-dev
@@ -38,6 +43,8 @@ postgresql:
 
 redis:
   enabled: true
+  image:
+    tag: latest
   architecture: standalone
   auth:
     enabled: false
@@ -55,43 +62,23 @@ redis:
         memory: 64Mi
 
 kafka:
-  enabled: true
-  controller:
-    replicaCount: 1
-  broker:
-    replicaCount: 0
-  listeners:
-    client:
-      protocol: PLAINTEXT
-    interbroker:
-      protocol: PLAINTEXT
-    controller:
-      protocol: PLAINTEXT
-  persistence:
-    size: 256Mi
-  resources:
-    requests:
-      cpu: 100m
-      memory: 256Mi
-    limits:
-      cpu: 500m
-      memory: 512Mi
+  enabled: false
 
 minio:
+  enabled: false
+
+# Custom infra (non-Bitnami) — deployed via templates/kafka-standalone.yaml and templates/minio-standalone.yaml
+kafkaStandalone:
   enabled: true
-  auth:
-    rootUser: fleetos
-    rootPassword: fleetos123
-  defaultBuckets: "fleetos-telemetry,fleetos-models,fleetos-training-data"
-  persistence:
-    size: 256Mi
-  resources:
-    requests:
-      cpu: 25m
-      memory: 64Mi
-    limits:
-      cpu: 250m
-      memory: 128Mi
+  image: confluentinc/cp-kafka:7.6.0
+  zookeeperImage: confluentinc/cp-zookeeper:7.6.0
+
+minioStandalone:
+  enabled: true
+  image: minio/minio:latest
+  rootUser: fleetos
+  rootPassword: fleetos123
+  buckets: "fleetos-telemetry,fleetos-models,fleetos-training-data"
 
 temporal:
   enabled: true
