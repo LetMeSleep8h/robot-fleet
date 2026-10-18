@@ -22,19 +22,20 @@ const (
 
 // Supported pipeline options (see TrainingPipelineWorkflow).
 var (
-	pipelineTasks    = map[string]bool{"locomotion": true, "reach": true}
+	pipelineTasks    = map[string]bool{"locomotion": true} // tasks with fleet experience to learn from
 	pipelineBackends = map[string]bool{"": true, "argo": true, "kubeflow": true}
-	katibTasks       = map[string]bool{"locomotion": true} // tasks exposing tunable flags
 )
 
-// PipelineRequest starts a training pipeline run.
+// PipelineRequest starts a training pipeline run, which learns offline from
+// the fleet's recorded experience.
 type PipelineRequest struct {
-	TaskType   string `json:"task_type"`
-	Timesteps  int    `json:"timesteps"` // 0 = workflow default
-	EnvID      string `json:"env_id"`
-	Backend    string `json:"backend"`   // "argo" (default) or "kubeflow"
-	UseKatib   bool   `json:"use_katib"` // Katib HPO before training (kubeflow)
-	AutoDeploy bool   `json:"auto_deploy"`
+	TaskType        string `json:"task_type"`
+	GradientSteps   int    `json:"gradient_steps"`    // 0 = trainer default
+	MinTransitions  int    `json:"min_transitions"`   // 0 = pipeline default
+	MaxDatasetFiles int    `json:"max_dataset_files"` // newest N experience batches; 0 = all
+	Backend         string `json:"backend"`           // "argo" (default) or "kubeflow"
+	UseKatib        bool   `json:"use_katib"`         // Katib HPO before training (kubeflow)
+	AutoDeploy      bool   `json:"auto_deploy"`
 }
 
 // PipelineRun describes a pipeline run and, once finished, its result.
@@ -74,13 +75,14 @@ func (s *pipelineService) StartPipeline(ctx context.Context, tenantID string, re
 		ID:        "pipeline-" + jobID,
 		TaskQueue: temporalpkg.TaskQueueTraining,
 	}, workflows.TrainingPipelineWorkflow, workflows.TrainingPipelineInput{
-		JobID:      jobID,
-		Timesteps:  req.Timesteps,
-		EnvID:      req.EnvID,
-		TaskType:   req.TaskType,
-		Backend:    req.Backend,
-		UseKatib:   req.UseKatib,
-		AutoDeploy: req.AutoDeploy,
+		JobID:           jobID,
+		TaskType:        req.TaskType,
+		Backend:         req.Backend,
+		UseKatib:        req.UseKatib,
+		AutoDeploy:      req.AutoDeploy,
+		GradientSteps:   req.GradientSteps,
+		MinTransitions:  req.MinTransitions,
+		MaxDatasetFiles: req.MaxDatasetFiles,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("start training pipeline for tenant %s: %w", tenantID, err)
@@ -94,15 +96,13 @@ func validatePipeline(req PipelineRequest) error {
 	}
 	switch {
 	case !pipelineTasks[req.TaskType]:
-		return invalid("task_type %q is not supported (locomotion, reach)", req.TaskType)
+		return invalid("task_type %q is not supported (locomotion)", req.TaskType)
 	case !pipelineBackends[req.Backend]:
 		return invalid("backend %q is not supported (argo, kubeflow)", req.Backend)
-	case req.Timesteps < 0:
-		return invalid("timesteps must not be negative")
+	case req.GradientSteps < 0 || req.MinTransitions < 0 || req.MaxDatasetFiles < 0:
+		return invalid("gradient_steps, min_transitions and max_dataset_files must not be negative")
 	case req.UseKatib && req.Backend == "argo":
 		return invalid("use_katib requires the kubeflow backend")
-	case req.UseKatib && !katibTasks[req.TaskType]:
-		return invalid("task_type %q has no tunable hyperparameters for Katib", req.TaskType)
 	}
 	return nil
 }

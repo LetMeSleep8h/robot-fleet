@@ -41,8 +41,8 @@ FleetOS uses a **cloud-brain** architecture — all reasoning on the platform, r
 ```
 ┌─ Playground (Robot) ──────────────────────────────┐
 │  MuJoCo Simulator (50 Hz)                         │
-│    ├─ Experience Writer → S3 (NDJSON, 500/batch)  │
 │    ├─ Telemetry Client → gRPC → Ingestion         │
+│    │    (incl. training context: obs, action, …)  │
 │    └─ Command Executor ← gRPC ← Ingestion         │
 └───────────────────────────────────────────────────┘
         │                              ▲
@@ -51,19 +51,22 @@ FleetOS uses a **cloud-brain** architecture — all reasoning on the platform, r
 │                                                    │
 │  Ingestion → Kafka → Processor                     │
 │                        ├─ S3 raw archive           │
+│                        ├─ S3 training_data/v2/     │
 │                        ├─ Redis hot state          │
 │                        └─ Postgres cold metadata   │
 │                                                    │
 │  Training (Temporal TrainingPipelineWorkflow)      │
+│    ├─ Snapshot fleet experience (dataset manifest) │
 │    ├─ [Katib HPO: TPE, 4 trials × 2 parallel]      │
-│    ├─ Train: Argo workflow or Kubeflow TrainJob    │
-│    ├─ Evaluate on 5 scenarios → eval gate          │
+│    ├─ Train offline (CQL-SAC, no simulator):       │
+│    │    Argo workflow or Kubeflow TrainJob         │
+│    ├─ Evaluate on MuJoCo test track → eval gate    │
 │    └─ Register (staged) → [auto canary deploy]     │
 │         ↓                                          │
 │  Model Registry (staged → canary → deployed)       │
 │         ↓                                          │
 │  Inference Service (:8081)                         │
-│    ├─ /predict — PPO policy forward pass           │
+│    ├─ /predict — PPO/SAC policy forward pass       │
 │    ├─ /resolve — FAISS semantic command search     │
 │    └─ Hot-swap via Redis pub/sub                   │
 │                                                    │
@@ -78,7 +81,9 @@ FleetOS uses a **cloud-brain** architecture — all reasoning on the platform, r
 ```
 
 **Key files:**
-- `platform/internal/temporal/workflows/training_pipeline.go` — training pipeline ([Katib] → train → evaluate → gate → register → canary)
+- `platform/internal/temporal/workflows/training_pipeline.go` — training pipeline (dataset snapshot → [Katib] → offline train → test-track evaluate → gate → register → canary)
+- `platform/internal/experience/` — fleet experience record format + S3 keys; `platform/internal/temporal/activities/training_dataset.go` — dataset snapshots (manifests)
+- `platform/training/train_offline.py` — offline CQL-SAC trainer (reads a dataset manifest; no simulator)
 - `platform/internal/kubeflow/` — Kubeflow Trainer TrainJob + Katib Experiment builders; `platform/deploy/k8s/workflows/` — Argo WorkflowTemplates
 - `platform/training/pipeline.py` — Kubeflow *Pipelines* (KFP) DAG definition; KFP is not installed and nothing invokes it (kept as reference)
 - `platform/internal/temporal/workflows/deployment.go` — canary deployment workflow
@@ -97,7 +102,7 @@ FleetOS uses a **cloud-brain** architecture — all reasoning on the platform, r
 | Source | Rate | Format | Storage | Key file |
 |--------|------|--------|---------|----------|
 | Telemetry | 10 Hz per robot | Protobuf → JSON | S3 `telemetry/{date}/{hour}/{robot_id}/` | `playground/simulator/telemetry_client.py` |
-| Experience transitions | 10 Hz (every 5th sim step) | NDJSON `{obs, action, reward, done}` | S3 `experience/{date}/{hour}/{robot_id}/` | `playground/simulator/experience_writer.py` |
+| Fleet experience (v2) | 10 Hz per robot (+ terminal record on each fall) | NDJSON `{obs (86), action (25), reward, episode_done, episode_id, step, exploration, …}` | S3 `fleetos-telemetry/training_data/v2/{YYYY/MM/DD/HH}/{robot_id}/` (100 per batch) | simulator `main.py` / `transitions.py` → `platform/internal/experience/` (processor) |
 | Robot hot state | 10 Hz | JSON | Redis `robot:state:{robot_id}` (5 min TTL) | `platform/cmd/processor/main.go` |
 | Robot cold metadata | ~0.2 Hz (every 50th packet) | SQL row | Postgres `robots` table | `platform/internal/store/postgres.go` |
 | Episodes | Daily batch | JSON | S3 `episodes/{date}/{robot_id}/` | `platform/analytics/episode_extractor.py` |
@@ -121,13 +126,13 @@ obs = concatenate([
 ])
 ```
 
-Single source of truth: `platform/training/observation.py`. Used by all environments, inference, and experience replay.
+Single source of truth: `platform/training/observation.py`. Used by all environments, inference, and fleet experience (the simulator sends the exact observation the policy saw).
 
 #### Data pipeline
 
 ```
-Simulator (50 Hz) → Experience Writer → S3 NDJSON (500 transitions/batch)
-                  → gRPC Telemetry → Ingestion → Kafka → Processor
+Simulator (50 Hz) → gRPC Telemetry (+ training context) → Ingestion → Kafka → Processor
+                                                           ├─ S3 training_data/v2/ (fleet experience)
                                                            ├─ S3 raw archive
                                                            ├─ Redis (real-time)
                                                            └─ Postgres (metadata)
@@ -140,6 +145,8 @@ Simulator (50 Hz) → Experience Writer → S3 NDJSON (500 transitions/batch)
 | **No feature versioning** | Observation changes break model compatibility silently | Add obs-space hash to model registry; validate at inference load time |
 | **No data quality monitoring** | Sensor drift or sim changes go unnoticed | Track obs distribution stats in Prometheus; alert on KL divergence |
 | **No curriculum data** | All experience is from uniform environment | Stage environment configs (flat → obstacles → wind) tied to training phases |
+| **Fleet data is only as good as fleet behaviour** | Offline RL can't get far beyond the behaviour policy; today's fleet mostly idles/falls (measured: 0% test-track pass rate after 29,480 transitions) | Bootstrap a walking policy with manual online training; raise exploration; collect task-diverse data |
+| **Snapshots list the whole prefix** | Fine locally; slow at fleet scale | Date-range / per-robot filtering and sharded manifests |
 
 ---
 
@@ -149,24 +156,24 @@ Simulator (50 Hz) → Experience Writer → S3 NDJSON (500 transitions/batch)
 
 | Aspect | Detail | File |
 |--------|--------|------|
-| PPO (locomotion) | On-policy RL, MLP [256, 256], lr=3e-4, n_steps=2048, gamma=0.99 | `training/train_locomotion.py` |
+| PPO (locomotion) — manual / bootstrap | On-policy RL in MuJoCo, MLP [256, 256], lr=3e-4, n_steps=2048, gamma=0.99 | `training/train_locomotion.py` |
 | SAC+HER (reaching) | Off-policy RL with hindsight goal relabeling, sparse reward | `training/train_reach.py` |
 | SAC+HER (grasping) | Goal-conditioned grasp+lift with optional scripted demos | `training/train_grasp.py` |
-| CQL (offline RL) | Conservative Q-Learning from collected S3 experience, no env interaction | `training/train_offline.py` |
+| CQL-SAC (offline RL) — **the pipeline's trainer** | Conservative Q-Learning on a pinned snapshot of fleet experience; raw observations (no VecNormalize), no simulator | `training/train_offline.py` |
 | Behavior Cloning | Supervised pre-training on (obs, action) pairs, SB3-compatible output | `training/train_bc.py` |
 | Autoencoder | Unsupervised 86→32-dim representation learning on observations | `training/train_autoencoder.py` |
 | Normalisation | VecNormalize (obs + reward), clip_obs=10.0 | `train_locomotion.py` |
-| Fine-tuning | `--base-model` loads prior policy (including BC-pretrained); `--from-experience` pre-seeds normaliser | All training scripts (standalone; the pipeline rejects these runs for now) |
+| Fine-tuning | `--base-model` loads prior policy (including BC-pretrained) | Online scripts, standalone (not in the pipeline) |
 | Export | `.zip` (SB3) + `.onnx` (PyTorch, locomotion only) | `train_locomotion.py` |
 | Training infra | Argo WorkflowTemplates or Kubeflow Trainer TrainJobs (runtime `fleetos-sb3`, 2–4 CPU / 3–6 Gi); CPU-only on local k3s | `deploy/k8s/workflows/`, `internal/kubeflow/` |
-| Hyperparameter search | Katib Experiment (TPE default) over learning_rate, n_steps, ent_coef → best params train the final model | `internal/kubeflow/`, `train_locomotion.py` flags |
+| Hyperparameter search | Katib Experiment (TPE default) over learning_rate, cql_alpha, batch_size; each trial = offline training on the snapshot + 5 test-track episodes → best params train the final model | `internal/kubeflow/`, `train_offline.py` flags |
 
 ### 4.2 Training Paradigms
 
 | Paradigm | Scripts | Data Source | When to Use |
 |----------|---------|-------------|-------------|
-| **Online RL** | `train_locomotion.py`, `train_reach.py`, `train_grasp.py` | Simulator interaction | Default — learning from scratch |
-| **Offline RL** | `train_offline.py` | S3 NDJSON experience | When sufficient experience collected; no GPU env needed |
+| **Offline RL** (pipeline) | `train_offline.py` | Fleet experience (`training_data/v2/`) | Default — learn from what robots actually did |
+| **Online RL** (manual) | `train_locomotion.py`, `train_reach.py`, `train_grasp.py` | Simulator interaction | Bootstrapping a first policy that produces useful fleet data |
 | **Supervised (BC)** | `train_bc.py` | Filtered experience or expert rollouts | Pre-training before RL fine-tuning for faster convergence |
 | **Unsupervised** | `train_autoencoder.py` | S3 observations only | Anomaly detection, representation learning |
 | **BC → RL** | `train_bc.py` then `train_*.py --base-model` | Demos then simulator | Complex tasks like grasping — best overall approach |
@@ -175,9 +182,10 @@ Simulator (50 Hz) → Experience Writer → S3 NDJSON (500 transitions/batch)
 
 | Gap | Impact | Suggested approach |
 |-----|--------|-------------------|
-| **Small HPO budget** | Katib search exists (locomotion only) but defaults to 4 trials × 20k timesteps — enough to exercise the loop, not to find good parameters | Raise `kubeflow.hpo.maxTrials` / `trialTimesteps` on real hardware; add net_arch + reach/grasp search spaces |
-| **Inference ignores VecNormalize** | `vec_normalize.pkl` is saved but not applied at inference, so served observations differ from training | Load the stats alongside each policy in the inference cache |
-| **Experience not used by the pipeline** | `CollectExperienceStats` returns a fixed estimate; experience/fine-tune runs are rejected | Count real S3 batches; add templates/TrainJobs that pass `--from-experience` / `--base-model` |
+| **Small HPO budget** | Katib defaults to 4 trials × 2,000 offline updates + 5 test-track episodes — enough to exercise the loop, not to find good parameters | Raise `kubeflow.hpo.maxTrials` / `trialGradientSteps` / `evalEpisodes` on real hardware; add net_arch to the search space |
+| **Offline updates are heavier, not lighter** | Measured: same 3,200 gradient updates took 51 s online (PPO) vs 100 s offline (CQL) on a 2–4 CPU pod | Benefits are data reuse, lineage and no sim-to-real gap — budget compute accordingly (GPU for CQL at scale) |
+| **Inference ignores VecNormalize for PPO models** | `vec_normalize.pkl` from manual PPO runs isn't applied at inference (pipeline CQL models use raw observations, so they're unaffected) | Load the stats alongside each PPO policy in the inference cache |
+| **Rewards come from the simulator** | Real robots don't compute `forward_vel + alive - ctrl_cost` | Derive rewards from telemetry in the processor |
 | **No experiment tracking** | Can't compare runs side-by-side | Integrate MLflow or W&B; log to existing S3 backend |
 | **No curriculum learning** | Policy trains on single difficulty | Progressive env configs: gravity, friction, wind ramp over training |
 | **Fixed architecture** | MLP may underperform for high-dim obs | Try LSTM/attention for temporal dependencies in joint dynamics |
@@ -253,7 +261,7 @@ This stage is the least covered. It focuses on understanding *why* the policy be
 | Problem Framing | ~100% | — |
 | High-Level Design | ~100% | — |
 | Data and Features | ~70% | No feature versioning or data quality monitoring |
-| Modelling | ~80% | No HPO, no experiment tracking (6 algorithms now implemented) |
+| Modelling | ~80% | Small HPO budget, no experiment tracking; fleet data limited by current fleet behaviour |
 | Inference and Evaluation | ~75% | No online A/B dashboard, weak statistical evaluation |
 | Deep Dives | ~5% | No failure analysis, interpretability, or robustness testing |
 
@@ -261,7 +269,7 @@ This stage is the least covered. It focuses on understanding *why* the policy be
 
 - **SAC+HER for reaching** — goal-conditioned reaching with sparse rewards and hindsight relabeling
 - **SAC+HER for grasping** — goal-conditioned grasp+lift environment with scripted demo generation
-- **CQL offline RL** — trains from collected S3 experience without environment interaction
+- **Offline training from fleet experience** — the pipeline trains CQL-SAC on pinned snapshots of real fleet data (`training_data/v2/`), no simulator in training; MuJoCo is the evaluation test track; models record their dataset manifest
 - **Behavior cloning** — supervised pre-training on (obs, action) pairs, SB3-compatible output for fine-tuning
 - **Autoencoder** — unsupervised 86→32-dim representation learning on observation vectors
 - **Unified 86-dim observation** — single format across all tasks and training scripts
@@ -272,7 +280,7 @@ This stage is the least covered. It focuses on understanding *why* the policy be
 
 1. **Experiment tracking** — Integrate MLflow backed by existing MinIO. Enables comparing algorithms with proper run history.
 
-2. **Hyperparameter tuning at scale** — Katib search is wired in (`use_katib: true`); extend the search space (network size) and budget, and add reach/grasp.
+2. **Better fleet data** — Bootstrap a walking policy (manual online PPO) so fleet experience contains useful behaviour; tune exploration; then scale the Katib budget (`use_katib: true` already searches lr / cql_alpha / batch size).
 
 3. **Autoencoder as feature extractor** — Plug trained encoder into SB3 as custom `FeaturesExtractor` for downstream RL tasks.
 

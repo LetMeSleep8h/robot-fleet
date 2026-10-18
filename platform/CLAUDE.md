@@ -21,7 +21,7 @@ Platform services (simulator lives in `playground/`):
 - **api** (`cmd/api/`) — REST API + WebSocket + auth + rate limiting + billing
 - **processor** (`cmd/processor/`) — Kafka consumer → Postgres/Redis/S3/ClickHouse; starts Temporal command workflows
 - **worker** (`cmd/worker/`) — Temporal worker (command dispatch, canary model deployment, training pipeline, billing, webhook workflows)
-- **training** (`training/`, run as Argo WorkflowTemplates or Kubeflow Trainer TrainJobs, optionally after a Katib HPO search) — PPO/SAC training + evaluation scripts, upload to S3
+- **training** (`training/`) — The Temporal pipeline trains OFFLINE from fleet experience: dataset snapshot of `training_data/v2/` → [Katib HPO] → `train_offline.py` (CQL-SAC, no simulator) as Argo template `fleetos-offline-training` or Kubeflow Trainer TrainJobs (runtime `fleetos-sb3`) → `evaluate_policy.py` on the MuJoCo test track (eval only). Online MuJoCo scripts (PPO `train_locomotion.py`, SAC+HER `train_reach.py`) remain as manual bootstrap tools; BC/autoencoder run standalone
 - **inference** (`inference/`, deployed in platform stack) — SB3 PPO policy serving + FAISS semantic command resolution, loads models from S3
 
 Also: `cmd/fleetos/` (cobra CLI client), `admin-web/` (React admin console served at `/admin/`).
@@ -70,10 +70,11 @@ make k8s-down          # Delete kind cluster
 # Deploy to k3s on Colima (lightweight; Argo + Kubeflow Trainer + Katib)
 make k3s-up        # Colima k3s + images + Argo Workflows + Kubeflow Trainer v2.3.0 + Katib v0.19.0 + Helm
 make k3s-images    # Rebuild images + restart platform pods
-make k3s-train TASK=locomotion TIMESTEPS=20000  # One-off Argo training workflow
+make k3s-train TASK=locomotion TIMESTEPS=20000  # Manual online (MuJoCo) training, e.g. bootstrap policy
 make k3s-down      # colima stop (MinIO PVC survives)
-# Full pipeline ([Katib] → train → eval → gate → register → canary):
-#   POST /api/v1/training/pipelines {"task_type":"locomotion","use_katib":true}
+# Full pipeline (fleet-data snapshot → [Katib] → offline train → test-track eval → gate → register → canary):
+#   POST /api/v1/training/pipelines {"task_type":"locomotion","gradient_steps":5000,"use_katib":true}
+# Playground against k3s: playground/docker-compose.k3s.yml (PLATFORM_HOST=<colima VM IP>)
 
 # K8s dashboards (all NodePort — accessible immediately after make k8s-up):
 #   ArgoCD:         http://localhost:30080
@@ -97,6 +98,7 @@ make k3s-down      # colima stop (MinIO PVC survives)
 | `internal/kube/` | Minimal in-cluster Kubernetes REST client (create/get custom resources) |
 | `internal/kubeflow/` | Kubeflow Trainer TrainJob + Katib Experiment builders and status parsing |
 | `internal/modelgate/` | Promotion gate (eval pass rate + reward vs deployed baseline) |
+| `internal/experience/` | Fleet experience records + S3 keys (`training_data/v2/`) written by the processor, read by offline training |
 | `internal/temporal/` | Temporal client, workflows, activities, Kafka ack bridge |
 | `internal/billing/` | Pricing tiers |
 | `internal/circuitbreaker/` | Circuit breaker for downstream calls |
@@ -112,7 +114,7 @@ make k3s-down      # colima stop (MinIO PVC survives)
 | `inference/` | SB3 PPO inference service (deployed in platform stack) |
 | `sdk/python/` | Python SDK (zero-dependency, typed) |
 | `sdk/typescript/` | TypeScript SDK (typed interfaces) |
-| `training/` | Model training pipelines |
+| `training/` | Offline CQL trainer (pipeline), test-track evaluation, manual online/BC/autoencoder scripts |
 | `analytics/` | Spark analytics pipeline |
 | `test/integration/` | Integration tests (gRPC, HTTP, WebSocket) |
 | `docs/` | OpenAPI spec, `architecture.md` (Mermaid), `ml-pipeline.md` |
@@ -234,6 +236,7 @@ make k3s-down      # colima stop (MinIO PVC survives)
 - Model versions are stored with `artifact_url` (S3 path), `metrics` (JSONB), and deployment timestamps.
 - The inference service loads models from S3 via the registry API; API inference requests carry the robot's assigned `artifact_url` (canary routing).
 - Promotion is gated (`internal/modelgate`): `POST /models/{id}/deploy` rejects unevaluated/failing models (422) and otherwise starts the Temporal canary (`ModelDeploymentWorkflow`); only its final step (`PromoteModel`) marks a model deployed.
+- Pipeline-trained models record their data lineage in `metrics` (`dataset_manifest`, `dataset_files`): the exact fleet-experience batches (`datasets/<job>/manifest.json`) they were trained on.
 
 ### SDK Requirements
 
@@ -259,7 +262,8 @@ Key variables (all have defaults for local dev):
 | `ARGO_SERVER_URL` | (empty = training off) | Argo Server REST API used by api + worker |
 | `MODEL_MIN_EVAL_PASS_RATE` | 0.5 | Promotion gate: minimum eval scenario pass rate |
 | `KUBEFLOW_ENABLED` | false | Worker submits Kubeflow TrainJobs / Katib Experiments (needs Trainer + Katib installed) |
-| `HPO_ALGORITHM` | tpe | Katib algorithm (also `HPO_MAX_TRIALS`=4, `HPO_PARALLEL_TRIALS`=2, `HPO_TRIAL_TIMESTEPS`=20000) |
+| `HPO_ALGORITHM` | tpe | Katib algorithm (also `HPO_MAX_TRIALS`=4, `HPO_PARALLEL_TRIALS`=2, `HPO_TRIAL_GRADIENT_STEPS`=2000, `HPO_EVAL_EPISODES`=5, `KUBEFLOW_TRAINING_SECRET`=fleetos-training) |
+| `TELEMETRY_BUCKET` | fleetos-telemetry | Worker: bucket holding fleet experience (`training_data/v2/`) for dataset snapshots |
 
 ## API Authentication
 

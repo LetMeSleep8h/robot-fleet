@@ -78,7 +78,8 @@ class TelemetryClient:
             training_ctx: Training data dict with keys:
                 action_taken (list[float]), step_reward (float),
                 task_command (str), episode_done (bool),
-                objects (list[dict])
+                objects (list[dict]), observation (list[float], 86-dim),
+                episode_id (str), step (int), exploration (bool)
         """
         if not self._connected:
             return
@@ -120,6 +121,11 @@ class TelemetryClient:
                 task_command=training_ctx.get("task_command", "idle"),
                 episode_done=training_ctx.get("episode_done", False),
                 objects=obj_states,
+                # Offline RL: exact policy input + episode bookkeeping
+                observation=training_ctx.get("observation", []),
+                episode_id=training_ctx.get("episode_id", ""),
+                step=training_ctx.get("step", 0),
+                exploration=training_ctx.get("exploration", False),
             )
 
         robot_state = RobotState(

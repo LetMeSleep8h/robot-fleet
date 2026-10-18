@@ -31,7 +31,8 @@ func TestStartPipeline_StartsTrainingWorkflow(t *testing.T) {
 
 	svc := NewPipelineService(tc)
 	res, err := svc.StartPipeline(context.Background(), "tenant-dev", PipelineRequest{
-		TaskType: "locomotion", Timesteps: 20000, Backend: "kubeflow", UseKatib: true, AutoDeploy: true,
+		TaskType: "locomotion", GradientSteps: 20000, MinTransitions: 5000, MaxDatasetFiles: 200,
+		Backend: "kubeflow", UseKatib: true, AutoDeploy: true,
 	})
 	if err != nil {
 		t.Fatalf("StartPipeline: %v", err)
@@ -39,7 +40,8 @@ func TestStartPipeline_StartsTrainingWorkflow(t *testing.T) {
 	if gotOpts.TaskQueue != temporalpkg.TaskQueueTraining || !strings.HasPrefix(gotOpts.ID, "pipeline-") {
 		t.Errorf("unexpected start options %+v", gotOpts)
 	}
-	if gotInput.JobID == "" || gotInput.TaskType != "locomotion" || gotInput.Timesteps != 20000 ||
+	if gotInput.JobID == "" || gotInput.TaskType != "locomotion" || gotInput.GradientSteps != 20000 ||
+		gotInput.MinTransitions != 5000 || gotInput.MaxDatasetFiles != 200 ||
 		gotInput.Backend != "kubeflow" || !gotInput.UseKatib || !gotInput.AutoDeploy {
 		t.Errorf("unexpected workflow input %+v", gotInput)
 	}
@@ -54,10 +56,12 @@ func TestStartPipeline_Validation(t *testing.T) {
 		req  PipelineRequest
 	}{
 		{"unknown task", PipelineRequest{TaskType: "grasp"}},
+		{"reach has no fleet dataset yet", PipelineRequest{TaskType: "reach"}},
 		{"unknown backend", PipelineRequest{TaskType: "locomotion", Backend: "sagemaker"}},
 		{"katib on argo", PipelineRequest{TaskType: "locomotion", Backend: "argo", UseKatib: true}},
-		{"katib for reach", PipelineRequest{TaskType: "reach", UseKatib: true}},
-		{"negative timesteps", PipelineRequest{TaskType: "locomotion", Timesteps: -1}},
+		{"negative gradient steps", PipelineRequest{TaskType: "locomotion", GradientSteps: -1}},
+		{"negative min transitions", PipelineRequest{TaskType: "locomotion", MinTransitions: -1}},
+		{"negative max files", PipelineRequest{TaskType: "locomotion", MaxDatasetFiles: -1}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

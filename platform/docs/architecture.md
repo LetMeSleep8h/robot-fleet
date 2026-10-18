@@ -59,9 +59,9 @@ graph TD
     subgraph Storage["Storage Layer"]
         PG[("PostgreSQL 16 (RDS)<br/>Multi-AZ, encrypted<br/>robots, models, commands,<br/>tenants, invoices, api_keys")]
         REDIS[("Redis 7 (ElastiCache)<br/>Sentinel failover<br/>hot state 5min TTL,<br/>rate limits, pub/sub")]
-        S3_TEL["S3: fleetos-telemetry<br/>NDJSON + video + lidar + audio<br/>→ Glacier 90d → Delete 365d"]
-        S3_MOD["S3: fleetos-models<br/>PPO/SAC/CQL policies<br/>versioned"]
-        S3_TRAIN["S3: fleetos-training-data<br/>experience (obs,action,reward)<br/>→ Glacier 30d → Delete 180d"]
+        S3_TEL["S3: fleetos-telemetry<br/>NDJSON + video + lidar + audio<br/>training_data/v2/ fleet experience<br/>→ Glacier 90d → Delete 365d"]
+        S3_MOD["S3: fleetos-models<br/>CQL/PPO/SAC policies, dataset manifests,<br/>eval results; versioned"]
+        S3_TRAIN["S3: fleetos-training-data<br/>(Terraform; unused locally —<br/>fleet experience is in fleetos-telemetry)<br/>→ Glacier 30d → Delete 180d"]
         CH[("ClickHouse<br/>OLAP analytics<br/>(optional, graceful fallback)")]
     end
 
@@ -78,10 +78,10 @@ graph TD
             TQ_TRAIN["fleetos-training<br/>TrainingPipelineWorkflow"]
         end
         subgraph MLCompute["ML Compute (argo + fleetos-training namespaces)"]
-            ARGOWF["Argo Workflows<br/>fleetos-*-training templates<br/>(train → evaluate)"]
+            ARGOWF["Argo Workflows<br/>fleetos-offline-training<br/>(offline train → test-track eval)"]
             KUBEFLOW["Kubeflow Trainer v2"]
-            PYTORCH["TrainJob<br/>runtime fleetos-sb3<br/>(train, then evaluate)"]
-            KATIB["Katib HPO<br/>TPE, 4 trials × 2 parallel"]
+            PYTORCH["TrainJob<br/>runtime fleetos-sb3<br/>(offline train, then eval)"]
+            KATIB["Katib HPO (offline trials)<br/>TPE, 4 trials × 2 parallel"]
         end
     end
 
@@ -176,6 +176,8 @@ graph TD
     %% ============================================================
     KUBEFLOW --> PYTORCH
     KUBEFLOW --> KATIB
+    S3_TEL -->|"fleet experience<br/>(dataset snapshot)"| ARGOWF
+    S3_TEL -->|"fleet experience<br/>(dataset snapshot)"| PYTORCH
     ARGOWF -->|"policy.zip +<br/>eval_results.json"| S3_MOD
     PYTORCH -->|"policy.zip +<br/>eval_results.json"| S3_MOD
     KATIB -->|"best params<br/>→ final TrainJob"| PYTORCH
@@ -331,19 +333,22 @@ graph TD
 ```mermaid
 graph TD
     TRIGGER["Trigger<br/>(POST /api/v1/training/pipelines;<br/>success_rate monitor not started yet)"] --> TEMP["Temporal<br/>TrainingPipelineWorkflow"]
-    TEMP -->|"use_katib"| HPO["RunHyperparameterSearch<br/>Katib Experiment (TPE)"]
+    FLEET["S3: training_data/v2/<br/>fleet experience"] --> SNAP["SnapshotDataset<br/>datasets/job-id/manifest.json"]
+    TEMP --> SNAP
+    SNAP -->|"too little data"| NODATA["phase=insufficient_data"]
+    SNAP -->|"use_katib"| HPO["RunHyperparameterSearch<br/>Katib Experiment (TPE),<br/>offline trials + test-track score"]
     HPO -->|"best params"| SUBMIT["SubmitTrainingRun"]
-    TEMP --> SUBMIT
+    SNAP --> SUBMIT
 
     subgraph Compute["Training compute (CPU on local k3s)"]
-        SUBMIT -->|"backend=argo"| ARGO["Argo WorkflowTemplate<br/>train → evaluate"]
-        SUBMIT -->|"backend=kubeflow"| TRAIN["Kubeflow TrainJobs<br/>runtime fleetos-sb3<br/>train → evaluate"]
+        SUBMIT -->|"backend=argo"| ARGO["Argo WorkflowTemplate<br/>offline CQL → test-track eval"]
+        SUBMIT -->|"backend=kubeflow"| TRAIN["Kubeflow TrainJobs<br/>runtime fleetos-sb3<br/>offline CQL → test-track eval"]
     end
 
     ARGO -->|"policy.zip + eval_results.json"| S3M["S3: models"]
     TRAIN -->|"policy.zip + eval_results.json"| S3M
     S3M --> EVAL["EvaluateTrainedModel<br/>reads this job's eval results"]
-    EVAL -->|"gate: pass rate ≥ 0.5<br/>reward ≤ 5% below deployed"| REG["RegisterModel<br/>status=staged"]
+    EVAL -->|"gate: pass rate ≥ 0.5<br/>reward ≤ 5% below deployed"| REG["RegisterModel<br/>status=staged<br/>+ dataset lineage"]
     EVAL -->|"rejected"| GATED["phase=gated<br/>(not registered)"]
     REG --> PG["PostgreSQL<br/>model_registry"]
     REG -->|"auto-deploy?"| DEPLOY["Child workflow:<br/>ModelDeploymentWorkflow<br/>(canary rollout)"]
@@ -351,8 +356,8 @@ graph TD
     classDef temporal fill:#f39c12,stroke:#d68910,color:#fff
     classDef storage fill:#e8a838,stroke:#b8862d,color:#fff
     classDef gpu fill:#9b59b6,stroke:#7d3c98,color:#fff
-    class TEMP,HPO,SUBMIT,EVAL,REG,DEPLOY,GATED temporal
-    class S3M,PG storage
+    class TEMP,SNAP,HPO,SUBMIT,EVAL,REG,DEPLOY,GATED,NODATA temporal
+    class S3M,PG,FLEET storage
     class TRAIN,ARGO gpu
 ```
 
@@ -452,6 +457,7 @@ graph LR
 | **Kafka over Redis for commands** | Ordering (partition by robot_id), durability, replay, consumer groups, DLQ |
 | **Temporal over Argo for business logic** | Durable state, signals, continue-as-new, sub-second latency, no pod per step |
 | **Two training backends: Argo and Kubeflow** | Argo WorkflowTemplates are the lightweight default; Kubeflow Trainer TrainJobs + Katib add hyperparameter search and a path to distributed/GPU runtimes. Both are driven by the same Temporal pipeline and evaluation gate |
+| **Train offline on fleet experience; MuJoCo only as test track** | Models learn from what robots actually did (no sim-to-real gap), one pinned dataset is reused by every run and Katib trial, and each model records its data. Not cheaper per update (measured: CQL ~2× PPO on the same update count); bounded by fleet behaviour, so manual online training remains for bootstrapping |
 | **Redis fail-closed on rate limiting** | Security: if Redis down, reject requests (don't disable rate limiting) |
 | **fnv32 for canary robot selection** | Deterministic: same robots get canary every time for reproducible debugging |
 | **S3 as telemetry source of truth** | Immutable, lifecycle-managed, cheap. ClickHouse is a derived OLAP view |

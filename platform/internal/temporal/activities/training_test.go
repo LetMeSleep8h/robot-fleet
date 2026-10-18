@@ -59,6 +59,11 @@ func (f *fakeRunner) GetWorkflowStatus(_ context.Context, _ string) (argo.Status
 // fakeArtifacts serves objects from a map.
 type fakeArtifacts map[string][]byte
 
+func (f fakeArtifacts) Put(_ context.Context, key string, data []byte, _ string) error {
+	f[key] = data
+	return nil
+}
+
 func (f fakeArtifacts) Get(_ context.Context, key string) ([]byte, error) {
 	if b, ok := f[key]; ok {
 		return b, nil
@@ -138,22 +143,23 @@ func requireNonRetryable(t *testing.T, err error) {
 	}
 }
 
+const testManifest = "datasets/job-7/manifest.json"
+
 func TestSubmitTrainingRun_NoRunnerFailsInsteadOfStubbing(t *testing.T) {
 	acts := &TrainingActivities{}
 	env := newActivityEnv(t, acts)
 
-	_, err := env.ExecuteActivity(acts.SubmitTrainingRun, SubmitTrainingRunInput{JobID: "j1", TaskType: "locomotion"})
+	_, err := env.ExecuteActivity(acts.SubmitTrainingRun, SubmitTrainingRunInput{JobID: "j1", DatasetManifest: testManifest})
 	requireNonRetryable(t, err)
 }
 
-func TestSubmitTrainingRun_RejectsUnsupportedRequests(t *testing.T) {
+func TestSubmitTrainingRun_RejectsInvalidRequests(t *testing.T) {
 	tests := []struct {
 		name  string
 		input SubmitTrainingRunInput
 	}{
-		{"unknown task", SubmitTrainingRunInput{JobID: "j1", TaskType: "autoencoder"}},
-		{"base model", SubmitTrainingRunInput{JobID: "j1", TaskType: "locomotion", BaseModel: "training/old/policy.zip"}},
-		{"experience", SubmitTrainingRunInput{JobID: "j1", TaskType: "locomotion", FromExperience: "experience/"}},
+		{"no dataset", SubmitTrainingRunInput{JobID: "j1"}},
+		{"unknown hyperparameter", SubmitTrainingRunInput{JobID: "j1", DatasetManifest: testManifest, Hyperparameters: map[string]string{"momentum": "0.9"}}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -170,13 +176,14 @@ func TestSubmitTrainingRun_RejectsUnsupportedRequests(t *testing.T) {
 	}
 }
 
-func TestSubmitTrainingRun_SubmitsTemplateAndWaits(t *testing.T) {
+func TestSubmitTrainingRun_SubmitsOfflineTemplateAndWaits(t *testing.T) {
 	runner := &fakeRunner{statuses: []argo.Status{{Phase: argo.PhasePending}, {Phase: argo.PhaseRunning}, {Phase: argo.PhaseSucceeded}}}
 	acts := &TrainingActivities{Runner: runner, PollInterval: time.Millisecond}
 	env := newActivityEnv(t, acts)
 
 	val, err := env.ExecuteActivity(acts.SubmitTrainingRun, SubmitTrainingRunInput{
-		JobID: "job-7", TaskType: "locomotion", Timesteps: 20000, EnvID: "FleetOS-Humanoid-v2",
+		JobID: "job-7", DatasetManifest: testManifest, GradientSteps: 5000,
+		Hyperparameters: map[string]string{"learning_rate": "0.0005", "cql_alpha": "2.0"},
 	})
 	if err != nil {
 		t.Fatalf("SubmitTrainingRun: %v", err)
@@ -190,10 +197,13 @@ func TestSubmitTrainingRun_SubmitsTemplateAndWaits(t *testing.T) {
 		t.Fatalf("expected 1 submission, got %d", len(runner.submitted))
 	}
 	sub := runner.submitted[0]
-	if sub.template != "fleetos-locomotion-training" {
+	if sub.template != OfflineTrainingTemplate {
 		t.Errorf("template = %q", sub.template)
 	}
-	wantParams := map[string]string{"job-id": "job-7", "timesteps": "20000", "env-id": "FleetOS-Humanoid-v2"}
+	wantParams := map[string]string{
+		"job-id": "job-7", "dataset-manifest": testManifest, "gradient-steps": "5000",
+		"learning-rate": "0.0005", "cql-alpha": "2.0",
+	}
 	for k, v := range wantParams {
 		if sub.params[k] != v {
 			t.Errorf("param %s = %q, want %q", k, sub.params[k], v)
@@ -202,33 +212,11 @@ func TestSubmitTrainingRun_SubmitsTemplateAndWaits(t *testing.T) {
 	if sub.labels[LabelJobID] != "job-7" {
 		t.Errorf("job label = %q", sub.labels[LabelJobID])
 	}
-	if out.RunID != "fleetos-locomotion-training-abc12" || out.Status != argo.PhaseSucceeded {
+	if out.RunID != OfflineTrainingTemplate+"-abc12" || out.Status != argo.PhaseSucceeded || out.ModelPath != "training/job-7/policy.zip" {
 		t.Errorf("unexpected output %+v", out)
-	}
-	if out.ModelPath != "training/job-7/policy.zip" {
-		t.Errorf("model path = %q", out.ModelPath)
 	}
 	if runner.statusCalls != 3 {
 		t.Errorf("expected 3 status polls, got %d", runner.statusCalls)
-	}
-}
-
-func TestSubmitTrainingRun_ReachOmitsEnvParam(t *testing.T) {
-	runner := &fakeRunner{statuses: []argo.Status{{Phase: argo.PhaseSucceeded}}}
-	acts := &TrainingActivities{Runner: runner, PollInterval: time.Millisecond}
-	env := newActivityEnv(t, acts)
-
-	if _, err := env.ExecuteActivity(acts.SubmitTrainingRun, SubmitTrainingRunInput{
-		JobID: "r1", TaskType: "reach", Timesteps: 1000, EnvID: "ignored",
-	}); err != nil {
-		t.Fatalf("SubmitTrainingRun: %v", err)
-	}
-	sub := runner.submitted[0]
-	if sub.template != "fleetos-reach-training" {
-		t.Errorf("template = %q", sub.template)
-	}
-	if _, ok := sub.params["env-id"]; ok {
-		t.Error("reach template has no env-id parameter")
 	}
 }
 
@@ -237,7 +225,7 @@ func TestSubmitTrainingRun_WorkflowFailure(t *testing.T) {
 	acts := &TrainingActivities{Runner: runner, PollInterval: time.Millisecond}
 	env := newActivityEnv(t, acts)
 
-	_, err := env.ExecuteActivity(acts.SubmitTrainingRun, SubmitTrainingRunInput{JobID: "j", TaskType: "locomotion"})
+	_, err := env.ExecuteActivity(acts.SubmitTrainingRun, SubmitTrainingRunInput{JobID: "j", DatasetManifest: testManifest})
 	requireNonRetryable(t, err)
 }
 
@@ -245,9 +233,9 @@ func TestSubmitTrainingRun_ResumesFromHeartbeatWithoutResubmitting(t *testing.T)
 	runner := &fakeRunner{statuses: []argo.Status{{Phase: argo.PhaseSucceeded}}}
 	acts := &TrainingActivities{Runner: runner, PollInterval: time.Millisecond}
 	env := newActivityEnv(t, acts)
-	env.SetHeartbeatDetails("fleetos-locomotion-training-prev1")
+	env.SetHeartbeatDetails("fleetos-offline-training-prev1")
 
-	val, err := env.ExecuteActivity(acts.SubmitTrainingRun, SubmitTrainingRunInput{JobID: "j", TaskType: "locomotion"})
+	val, err := env.ExecuteActivity(acts.SubmitTrainingRun, SubmitTrainingRunInput{JobID: "j", DatasetManifest: testManifest})
 	if err != nil {
 		t.Fatalf("SubmitTrainingRun: %v", err)
 	}
@@ -256,7 +244,7 @@ func TestSubmitTrainingRun_ResumesFromHeartbeatWithoutResubmitting(t *testing.T)
 	if len(runner.submitted) != 0 {
 		t.Errorf("retry must not resubmit, got %d submissions", len(runner.submitted))
 	}
-	if out.RunID != "fleetos-locomotion-training-prev1" {
+	if out.RunID != "fleetos-offline-training-prev1" {
 		t.Errorf("RunID = %q", out.RunID)
 	}
 }
@@ -266,7 +254,7 @@ func TestSubmitTrainingRun_TooManyPollErrors(t *testing.T) {
 	acts := &TrainingActivities{Runner: runner, PollInterval: time.Millisecond}
 	env := newActivityEnv(t, acts)
 
-	_, err := env.ExecuteActivity(acts.SubmitTrainingRun, SubmitTrainingRunInput{JobID: "j", TaskType: "locomotion"})
+	_, err := env.ExecuteActivity(acts.SubmitTrainingRun, SubmitTrainingRunInput{JobID: "j", DatasetManifest: testManifest})
 	if err == nil {
 		t.Fatal("expected error after repeated poll failures")
 	}

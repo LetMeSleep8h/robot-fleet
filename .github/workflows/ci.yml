@@ -114,6 +114,7 @@ jobs:
           - suite: simulator
             dir: playground/simulator
             requirements: requirements.txt
+            apt: libosmesa6  # MuJoCo env tests (runners have no EGL)
           - suite: sdk
             dir: platform/sdk/python
             requirements: ""

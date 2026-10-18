@@ -1,6 +1,7 @@
 package workflows
 
 import (
+	"errors"
 	"fmt"
 	"time"
 
@@ -11,28 +12,37 @@ import (
 	"github.com/dimuthu/robot-fleet/internal/temporal/activities"
 )
 
+// Pipeline defaults.
+const (
+	DefaultMinTransitions = 1_000 // refuse to train on less fleet experience
+	OfflineAlgorithm      = "cql-sac"
+	offlineModelName      = "cql-fleet"
+)
+
 // TrainingPipelineInput is the input for TrainingPipelineWorkflow.
 type TrainingPipelineInput struct {
-	JobID          string `json:"job_id"`
-	Timesteps      int    `json:"timesteps"`       // default: 2000000
-	EnvID          string `json:"env_id"`          // empty = WorkflowTemplate default
-	TaskType       string `json:"task_type"`       // "locomotion" or "reach"
-	Backend        string `json:"backend"`         // "argo" (default) or "kubeflow"
-	UseKatib       bool   `json:"use_katib"`       // Katib HPO first; implies the kubeflow backend
-	AutoDeploy     bool   `json:"auto_deploy"`     // auto canary deploy if evaluation passes
-	BaseModel      string `json:"base_model"`      // S3 key for fine-tuning, empty = from scratch
-	FromExperience bool   `json:"from_experience"` // include collected experience
+	JobID           string `json:"job_id"`
+	TaskType        string `json:"task_type"`         // "locomotion" (recorded on the model)
+	Backend         string `json:"backend"`           // "argo" (default) or "kubeflow"
+	UseKatib        bool   `json:"use_katib"`         // Katib HPO first; implies the kubeflow backend
+	AutoDeploy      bool   `json:"auto_deploy"`       // auto canary deploy if evaluation passes
+	GradientSteps   int    `json:"gradient_steps"`    // offline updates; 0 = trainer default
+	MinTransitions  int    `json:"min_transitions"`   // 0 = DefaultMinTransitions
+	MaxDatasetFiles int    `json:"max_dataset_files"` // newest N experience batches; 0 = all
 }
 
 // TrainingPipelineResult is the output of TrainingPipelineWorkflow.
 type TrainingPipelineResult struct {
 	JobID       string  `json:"job_id"`
 	ModelID     string  `json:"model_id"`
-	Phase       string  `json:"phase"` // "trained", "registered", "deployed", "failed", "gated"
+	Phase       string  `json:"phase"` // "insufficient_data", "gated", "registered", "deployed", "failed"
 	MeanReward  float64 `json:"mean_reward"`
 	PassRate    float64 `json:"pass_rate"`
 	Improvement float64 `json:"improvement_pct"`
 	GateReason  string  `json:"gate_reason,omitempty"`
+	// Data lineage: the snapshot of fleet experience this run trained on.
+	DatasetManifest string `json:"dataset_manifest,omitempty"`
+	DatasetFiles    int    `json:"dataset_files,omitempty"`
 	// Set when a Katib search chose the hyperparameters.
 	HPOExperiment string            `json:"hpo_experiment,omitempty"`
 	BestParams    map[string]string `json:"best_params,omitempty"`
@@ -41,38 +51,20 @@ type TrainingPipelineResult struct {
 // SignalRetrain is the signal name to trigger retraining.
 const SignalRetrain = "retrain"
 
-// TrainingPipelineWorkflow orchestrates the full ML lifecycle:
-// [Katib hyperparameter search] → train + evaluate (Argo workflow or Kubeflow
-// TrainJobs) → gate on the evaluation results → register → canary deploy.
+// TrainingPipelineWorkflow learns from the fleet, not from a simulator:
+// snapshot fleet experience → [Katib search] → offline CQL training (Argo or
+// Kubeflow) → evaluate on the MuJoCo test track → gate → register → canary.
 //
-// Can be triggered by:
-// 1. Manual API call (POST /api/v1/locomotion/jobs)
-// 2. Signal from monitoring when success_rate drops below threshold
-// 3. Cron schedule (weekly retraining)
+// Started by POST /api/v1/training/pipelines.
 func TrainingPipelineWorkflow(ctx workflow.Context, input TrainingPipelineInput) (*TrainingPipelineResult, error) {
 	logger := workflow.GetLogger(ctx)
 
-	if input.Timesteps == 0 {
-		input.Timesteps = 2_000_000
-	}
 	if input.TaskType == "" {
 		input.TaskType = "locomotion"
 	}
-
-	algorithm := "ppo"
-	switch input.TaskType {
-	case "reach":
-		algorithm = "sac"
-	case "grasp":
-		algorithm = "sac"
-	case "offline":
-		algorithm = "cql"
-	case "bc":
-		algorithm = "bc"
-	case "autoencoder":
-		algorithm = "autoencoder"
+	if input.MinTransitions == 0 {
+		input.MinTransitions = DefaultMinTransitions
 	}
-
 	if input.JobID == "" {
 		input.JobID = fmt.Sprintf("train-%d", workflow.Now(ctx).UnixNano())
 	}
@@ -94,29 +86,35 @@ func TrainingPipelineWorkflow(ctx workflow.Context, input TrainingPipelineInput)
 
 	result := &TrainingPipelineResult{JobID: input.JobID}
 
-	// Step 1: Check experience data availability
-	experiencePrefix := ""
-	if input.FromExperience {
-		var expStats activities.CollectExperienceOutput
-		err := workflow.ExecuteActivity(actCtx, "CollectExperienceStats", activities.CollectExperienceInput{
-			S3Bucket: "fleetos-models",
-			Prefix:   "experience/",
-		}).Get(ctx, &expStats)
-		if err == nil && expStats.TransitionCount > 1000 {
-			experiencePrefix = "experience/"
-			logger.Info("experience data available", "transitions", expStats.TransitionCount)
+	// Step 1: Pin the fleet experience this run trains on.
+	var snapshot activities.SnapshotDatasetOutput
+	if err := workflow.ExecuteActivity(actCtx, "SnapshotDataset", activities.SnapshotDatasetInput{
+		JobID:          input.JobID,
+		MaxFiles:       input.MaxDatasetFiles,
+		MinTransitions: input.MinTransitions,
+	}).Get(ctx, &snapshot); err != nil {
+		var appErr *temporal.ApplicationError
+		if errors.As(err, &appErr) && appErr.Type() == activities.ErrTypeInsufficientData {
+			result.Phase = "insufficient_data"
+			result.GateReason = appErr.Error()
+			logger.Warn("not enough fleet experience to train", "reason", appErr.Error())
+			return result, nil
 		}
+		result.Phase = "failed"
+		return result, fmt.Errorf("dataset snapshot failed: %w", err)
 	}
+	result.DatasetManifest = snapshot.ManifestKey
+	result.DatasetFiles = snapshot.Files
+	logger.Info("dataset snapshot", "manifest", snapshot.ManifestKey, "files", snapshot.Files, "transitions", snapshot.EstimatedTransitions)
 
-	// Step 2 (optional): Katib hyperparameter search. Katib runs on Kubeflow,
-	// so the final training run uses the kubeflow backend too.
+	// Step 2 (optional): Katib hyperparameter search on the same snapshot.
+	// Katib runs on Kubeflow, so the final training run does too.
 	if input.UseKatib {
 		input.Backend = activities.BackendKubeflow
 		var search activities.HyperparameterSearchOutput
 		if err := workflow.ExecuteActivity(longActCtx, "RunHyperparameterSearch", activities.HyperparameterSearchInput{
-			JobID:    input.JobID,
-			TaskType: input.TaskType,
-			EnvID:    input.EnvID,
+			JobID:           input.JobID,
+			DatasetManifest: snapshot.ManifestKey,
 		}).Get(ctx, &search); err != nil {
 			result.Phase = "failed"
 			return result, fmt.Errorf("hyperparameter search failed: %w", err)
@@ -126,18 +124,13 @@ func TrainingPipelineWorkflow(ctx workflow.Context, input TrainingPipelineInput)
 		logger.Info("katib search complete", "experiment", search.Experiment, "best_params", search.BestParams, "objective", search.BestObjective)
 	}
 
-	// Step 3: Train + evaluate on the chosen backend (blocks until done)
-	logger.Info("submitting training", "job_id", input.JobID, "timesteps", input.Timesteps, "backend", input.Backend)
-
+	// Step 3: Offline training + test-track evaluation (blocks until done).
+	logger.Info("submitting offline training", "job_id", input.JobID, "backend", input.Backend)
 	var trainResult activities.SubmitTrainingRunOutput
 	err := workflow.ExecuteActivity(longActCtx, "SubmitTrainingRun", activities.SubmitTrainingRunInput{
 		JobID:           input.JobID,
-		Timesteps:       input.Timesteps,
-		EnvID:           input.EnvID,
-		BaseModel:       input.BaseModel,
-		FromExperience:  experiencePrefix,
-		TaskType:        input.TaskType,
-		Algorithm:       algorithm,
+		DatasetManifest: snapshot.ManifestKey,
+		GradientSteps:   input.GradientSteps,
 		Backend:         input.Backend,
 		Hyperparameters: result.BestParams,
 	}).Get(ctx, &trainResult)
@@ -145,10 +138,9 @@ func TrainingPipelineWorkflow(ctx workflow.Context, input TrainingPipelineInput)
 		result.Phase = "failed"
 		return result, fmt.Errorf("training submission failed: %w", err)
 	}
-
 	logger.Info("training finished", "run_id", trainResult.RunID, "model_path", trainResult.ModelPath)
 
-	// Step 4: Gate on this job's evaluation results vs the deployed baseline
+	// Step 4: Gate on this job's evaluation results vs the deployed baseline.
 	var evalResult activities.EvaluateModelOutput
 	err = workflow.ExecuteActivity(actCtx, "EvaluateTrainedModel", activities.EvaluateModelInput{
 		JobID: input.JobID,
@@ -162,43 +154,30 @@ func TrainingPipelineWorkflow(ctx workflow.Context, input TrainingPipelineInput)
 	result.PassRate = evalResult.PassRate
 	result.Improvement = evalResult.Improvement
 
-	// Gate: only proceed if model passes evaluation threshold
 	if !evalResult.PassesGate {
 		result.Phase = "gated"
 		result.GateReason = evalResult.GateReason
 		logger.Warn("model did not pass evaluation gate", "reason", evalResult.GateReason)
-		_ = workflow.ExecuteActivity(actCtx, "NotifyTrainingComplete", input.JobID, false).Get(ctx, nil)
+		_ = workflow.ExecuteActivity(actCtx, "NotifyTrainingComplete", input.JobID, false).Get(ctx, nil) // best-effort notification
 		return result, nil
 	}
 
-	// Step 5: Register model in registry
+	// Step 5: Register the model with its data lineage.
 	var modelID string
-	version := fmt.Sprintf("v%d", workflow.Now(ctx).Unix())
-	name := "ppo-lab"
-	switch input.TaskType {
-	case "reach":
-		name = "sac-reach"
-	case "grasp":
-		name = "sac-grasp"
-	case "offline":
-		name = "cql-offline"
-	case "bc":
-		name = "bc-pretrain"
-	case "autoencoder":
-		name = "autoencoder"
-	}
 	err = workflow.ExecuteActivity(actCtx, "RegisterTrainedModel", activities.RegisterTrainedModelInput{
-		Name:            name,
-		Version:         version,
+		Name:            offlineModelName,
+		Version:         fmt.Sprintf("v%d", workflow.Now(ctx).Unix()),
 		ArtifactURL:     trainResult.ModelPath,
 		MeanReward:      evalResult.MeanReward,
 		PassRate:        evalResult.PassRate,
-		Environment:     input.EnvID,
+		Environment:     activities.EvalEnvID,
 		TaskType:        input.TaskType,
-		Algorithm:       algorithm,
+		Algorithm:       OfflineAlgorithm,
 		Backend:         backendName(input.Backend),
 		Hyperparameters: result.BestParams,
 		HPOExperiment:   result.HPOExperiment,
+		DatasetManifest: snapshot.ManifestKey,
+		DatasetFiles:    snapshot.Files,
 	}).Get(ctx, &modelID)
 	if err != nil {
 		result.Phase = "failed"
@@ -209,7 +188,7 @@ func TrainingPipelineWorkflow(ctx workflow.Context, input TrainingPipelineInput)
 	result.Phase = "registered"
 	logger.Info("model registered", "model_id", modelID)
 
-	// Step 6: Auto-deploy via canary (if enabled)
+	// Step 6: Auto-deploy via canary (if enabled).
 	if input.AutoDeploy {
 		logger.Info("starting canary deployment", "model_id", modelID)
 
@@ -225,7 +204,7 @@ func TrainingPipelineWorkflow(ctx workflow.Context, input TrainingPipelineInput)
 		}).Get(ctx, &deployResult)
 
 		if err != nil || deployResult.Phase == "rolled_back" {
-			result.Phase = "registered" // deployed failed but model is still in registry
+			result.Phase = "registered" // deploy failed but the model stays in the registry
 			logger.Warn("canary deployment failed or rolled back", "model_id", modelID)
 		} else {
 			result.Phase = "deployed"
@@ -233,7 +212,7 @@ func TrainingPipelineWorkflow(ctx workflow.Context, input TrainingPipelineInput)
 		}
 	}
 
-	_ = workflow.ExecuteActivity(actCtx, "NotifyTrainingComplete", modelID, result.Phase == "deployed").Get(ctx, nil)
+	_ = workflow.ExecuteActivity(actCtx, "NotifyTrainingComplete", modelID, result.Phase == "deployed").Get(ctx, nil) // best-effort notification
 
 	return result, nil
 }

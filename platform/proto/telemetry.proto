@@ -79,6 +79,10 @@ message TrainingContext {
   string task_command = 3;            // current command: "idle", "walk", "reach", "pick_up", etc.
   bool episode_done = 4;             // true if robot fell / episode terminated
   repeated ObjectState objects = 5;   // dynamic object positions for manipulation tasks
+  repeated double observation = 6;    // exact 86-dim policy input at this step (offline training)
+  string episode_id = 7;              // per-robot episode identifier
+  int64 step = 8;                     // step index within the episode, starting at 0
+  bool exploration = 9;               // applied action included exploration noise
 }
 
 message ObjectState {

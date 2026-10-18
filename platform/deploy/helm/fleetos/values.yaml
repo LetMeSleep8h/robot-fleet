@@ -298,4 +298,6 @@ kubeflow:
     algorithm: tpe        # Katib algorithm: tpe | random | bayesianoptimization | ...
     maxTrials: 4
     parallelTrials: 2
-    trialTimesteps: 20000 # short runs: trials only need a comparable metric
+    trialGradientSteps: 2000 # short offline runs: trials only need a comparable metric
+    evalEpisodes: 5          # MuJoCo test-track episodes per trial (the objective)
+  trainingSecret: fleetos-training  # S3 credentials mounted into Katib trials

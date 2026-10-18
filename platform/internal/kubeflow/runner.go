@@ -66,18 +66,17 @@ func (r *Runner) TrainJobStatus(ctx context.Context, name string) (JobStatus, er
 }
 
 // SubmitExperiment creates a Katib Experiment that searches SearchSpace by
-// running short train_locomotion.py trials and maximizing ObjectiveMetric.
+// running short offline train_offline.py trials and maximizing ObjectiveMetric.
 func (r *Runner) SubmitExperiment(ctx context.Context, spec ExperimentSpec) (string, error) {
 	params := make([]map[string]any, 0, len(SearchSpace))
 	trialParams := make([]map[string]any, 0, len(SearchSpace)+1)
 	command := []string{
-		"python", "train_locomotion.py",
+		"python", "train_offline.py",
 		"--job-id=${trialParameters.trialName}",
-		"--timesteps=" + strconv.Itoa(spec.TrialTimesteps),
+		"--dataset-manifest=" + spec.DatasetManifest,
+		"--gradient-steps=" + strconv.Itoa(spec.TrialGradientSteps),
+		"--eval-episodes=" + strconv.Itoa(spec.EvalEpisodes),
 		"--output-dir=/tmp/output",
-	}
-	if spec.EnvID != "" {
-		command = append(command, "--env-id="+spec.EnvID)
 	}
 	for _, hp := range SearchSpace {
 		space := map[string]any{}
@@ -91,9 +90,8 @@ func (r *Runner) SubmitExperiment(ctx context.Context, spec ExperimentSpec) (str
 		command = append(command, fmt.Sprintf("%s=${trialParameters.%s}", hp.Flag, hp.TrialParam))
 	}
 	trialParams = append(trialParams, map[string]any{"name": "trialName", "reference": "${trialSpec.Name}"})
-	// Trials only report the metric: no artifact uploads, no callbacks. Set via
-	// flags because Katib's template validation drops empty env values.
-	command = append(command, "--s3-endpoint=", "--callback-url=")
+	// Trials only report the objective: no artifact uploads, no callbacks.
+	command = append(command, "--no-upload")
 
 	obj := map[string]any{
 		"apiVersion": "kubeflow.org/v1beta1",
@@ -123,6 +121,9 @@ func (r *Runner) SubmitExperiment(ctx context.Context, spec ExperimentSpec) (str
 									"image":           r.cfg.Image,
 									"imagePullPolicy": "IfNotPresent",
 									"command":         command,
+									// Trials read the dataset from S3. (envFrom, not env:
+									// Katib's template validation drops empty env values.)
+									"envFrom": []map[string]any{{"secretRef": map[string]any{"name": r.cfg.TrainingSecret}}},
 									"resources": map[string]any{
 										"requests": map[string]any{"cpu": trialCPURequest, "memory": trialMemoryRequest},
 										"limits":   map[string]any{"cpu": trialCPULimit, "memory": trialMemoryLimit},
@@ -182,7 +183,7 @@ func (r *Runner) ExperimentStatus(ctx context.Context, name string) (ExperimentS
 }
 
 // HyperparameterArgs converts Katib's best parameter assignments into
-// train_locomotion.py flags, sorted for deterministic commands.
+// train_offline.py flags, sorted for deterministic commands.
 func HyperparameterArgs(params map[string]string) ([]string, error) {
 	flags := make(map[string]string, len(SearchSpace))
 	for _, hp := range SearchSpace {

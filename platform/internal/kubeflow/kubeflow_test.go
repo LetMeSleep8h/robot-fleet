@@ -10,7 +10,7 @@ import (
 	"github.com/dimuthu/robot-fleet/internal/kube"
 )
 
-var testCfg = Config{Namespace: "fleetos-training", Runtime: "fleetos-sb3", Image: "fleetos/training:latest"}
+var testCfg = Config{Namespace: "fleetos-training", Runtime: "fleetos-sb3", Image: "fleetos/training:latest", TrainingSecret: "fleetos-training"}
 
 // fakeAPI records created objects and serves scripted Get responses.
 type fakeAPI struct {
@@ -118,12 +118,13 @@ func TestTrainJobStatus(t *testing.T) {
 	}
 }
 
-func TestSubmitExperiment_BuildsKatibSearch(t *testing.T) {
+func TestSubmitExperiment_BuildsOfflineKatibSearch(t *testing.T) {
 	api := &fakeAPI{}
 	r := NewRunner(api, testCfg)
 
 	if _, err := r.SubmitExperiment(context.Background(), ExperimentSpec{
-		Name: "hpo-job-1", Algorithm: "tpe", MaxTrials: 4, ParallelTrials: 2, TrialTimesteps: 20000, EnvID: "FleetOS-Humanoid-v2",
+		Name: "hpo-job-1", Algorithm: "tpe", MaxTrials: 4, ParallelTrials: 2,
+		DatasetManifest: "datasets/job-1/manifest.json", TrialGradientSteps: 2000, EvalEpisodes: 5,
 	}); err != nil {
 		t.Fatalf("SubmitExperiment: %v", err)
 	}
@@ -146,14 +147,22 @@ func TestSubmitExperiment_BuildsKatibSearch(t *testing.T) {
 	containers := dig(t, obj, "spec", "trialTemplate", "trialSpec", "spec", "template", "spec", "containers").([]map[string]any)
 	cmd := strings.Join(containers[0]["command"].([]string), " ")
 	for _, want := range []string{
-		"train_locomotion.py", "--timesteps=20000", "--env-id=FleetOS-Humanoid-v2",
-		"--learning-rate=${trialParameters.learningRate}", "--n-steps=${trialParameters.nSteps}",
-		// Trials only report the metric: no uploads, no callbacks.
-		"--s3-endpoint= ", "--callback-url=",
+		"train_offline.py", "--dataset-manifest=datasets/job-1/manifest.json", "--gradient-steps=2000", "--eval-episodes=5",
+		"--learning-rate=${trialParameters.learningRate}", "--cql-alpha=${trialParameters.cqlAlpha}",
+		// Trials only report the objective: no uploads, no callbacks.
+		"--no-upload",
 	} {
-		if !strings.Contains(cmd+" ", want) {
+		if !strings.Contains(cmd, want) {
 			t.Errorf("trial command %q missing %q", cmd, want)
 		}
+	}
+	if strings.Contains(cmd, "train_locomotion.py") {
+		t.Error("trials must train offline, not in the simulator")
+	}
+	// Trials read the dataset from S3, so they need the training secret.
+	envFrom := containers[0]["envFrom"].([]map[string]any)
+	if envFrom[0]["secretRef"].(map[string]any)["name"] != "fleetos-training" {
+		t.Errorf("envFrom = %v", envFrom)
 	}
 	if _, hasEnv := containers[0]["env"]; hasEnv {
 		t.Error("trial containers must not set env (Katib drops empty env values)")
@@ -197,11 +206,11 @@ func TestExperimentStatus_ReadsBestTrial(t *testing.T) {
 }
 
 func TestHyperparameterArgs(t *testing.T) {
-	args, err := HyperparameterArgs(map[string]string{"n_steps": "1024", "learning_rate": "0.0012"})
+	args, err := HyperparameterArgs(map[string]string{"cql_alpha": "2.5", "learning_rate": "0.0012"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !reflect.DeepEqual(args, []string{"--learning-rate=0.0012", "--n-steps=1024"}) {
+	if !reflect.DeepEqual(args, []string{"--cql-alpha=2.5", "--learning-rate=0.0012"}) {
 		t.Errorf("args = %v", args)
 	}
 	if _, err := HyperparameterArgs(map[string]string{"momentum": "0.9"}); err == nil {

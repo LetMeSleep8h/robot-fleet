@@ -32,19 +32,20 @@ All Go platform code lives under `platform/`. The Go module root is `platform/go
 │    └─ Polls model registry for deployments       │
 │  Worker (Temporal) — commands, canary deploys,   │
 │    training pipeline, billing, webhooks          │
-│  Training: Argo or Kubeflow TrainJob [+Katib] → S3│
+│  Training: offline CQL on fleet data (Argo or    │
+│    Kubeflow [+Katib]); MuJoCo = eval only → S3   │
 │  Processor → Postgres/Redis/S3/ClickHouse        │
 └──────────────────────────────────────────────────┘
 ```
 
 Services:
-- **simulator** (`playground/simulator/`) — MuJoCo physics (Python), sends telemetry via gRPC, receives commands via gRPC, writes experience to S3
+- **simulator** (`playground/simulator/`) — MuJoCo physics (Python), sends telemetry (incl. training context: 86-dim obs, action, reward, episode/step, exploration) via gRPC, receives commands via gRPC
 - **ingestion** (`platform/cmd/ingestion/`) — gRPC server → Kafka producer; consumes `robot.commands.dispatch` from Kafka → gRPC StreamCommands
 - **api** (`platform/cmd/api/`) — REST API + WebSocket + auth + rate limiting + billing; serves the admin console at `/admin/`
 - **processor** (`platform/cmd/processor/`) — Kafka consumer → Postgres/Redis/S3/ClickHouse; starts Temporal command workflows
 - **worker** (`platform/cmd/worker/`) — Temporal worker: CommandDispatch, ModelDeployment (canary), TrainingPipeline, BillingCycle, WebhookFanout workflows
 - **inference** (`platform/inference/`) — SB3 PPO policy serving + FAISS semantic command resolution, loads models from S3
-- **training** (`platform/training/`) — Training scripts (PPO, SAC+HER, CQL, BC, autoencoder). The Temporal pipeline runs locomotion/reach as Argo WorkflowTemplates or Kubeflow Trainer TrainJobs (runtime `fleetos-sb3`), optionally after a Katib HPO search; scripts also run locally. Uploads to S3
+- **training** (`platform/training/`) — The Temporal pipeline trains OFFLINE from fleet experience: dataset snapshot of `training_data/v2/` → [Katib HPO] → `train_offline.py` (CQL-SAC, no simulator) as Argo template `fleetos-offline-training` or Kubeflow Trainer TrainJobs (runtime `fleetos-sb3`) → `evaluate_policy.py` on the MuJoCo test track (eval only). Online MuJoCo scripts (PPO `train_locomotion.py`, SAC+HER `train_reach.py`) remain as manual bootstrap tools; BC/autoencoder run standalone
 
 Also: `platform/cmd/fleetos/` (cobra CLI client for the API), `platform/admin-web/` (React admin console), `playground/web/` (React + Three.js 3D dashboard), `playground/ros2_bridge/` (ROS 2 topic bridge). `playground/cmd/simulator/` + `playground/internal/` is the legacy Go kinematic simulator (`Dockerfile.simulator-go`), superseded by the MuJoCo one.
 
@@ -95,10 +96,11 @@ cd platform && make k8s-down      # Delete kind cluster
 # Deploy to k3s on Colima (lightweight; Argo + Kubeflow Trainer + Katib)
 cd platform && make k3s-up        # Colima k3s + images + Argo Workflows + Kubeflow Trainer v2.3.0 + Katib v0.19.0 + Helm
 cd platform && make k3s-images    # Rebuild images + restart platform pods
-cd platform && make k3s-train TASK=locomotion TIMESTEPS=20000  # One-off Argo training workflow
+cd platform && make k3s-train TASK=locomotion TIMESTEPS=20000  # Manual online (MuJoCo) training, e.g. bootstrap policy
 cd platform && make k3s-down      # colima stop (MinIO PVC survives)
-# Full pipeline ([Katib] → train → eval → gate → register → canary):
-#   POST /api/v1/training/pipelines {"task_type":"locomotion","use_katib":true}
+# Full pipeline (fleet-data snapshot → [Katib] → offline train → test-track eval → gate → register → canary):
+#   POST /api/v1/training/pipelines {"task_type":"locomotion","gradient_steps":5000,"use_katib":true}
+# Playground against k3s: playground/docker-compose.k3s.yml (PLATFORM_HOST=<colima VM IP>)
 
 # K8s dashboards (all NodePort, no port-forward needed after make k8s-up):
 #   ArgoCD:         http://localhost:30080
@@ -127,6 +129,7 @@ python3 train_locomotion.py --job-id demo --timesteps 50000 \
 | `platform/internal/kube/` | Minimal in-cluster Kubernetes REST client (create/get custom resources) |
 | `platform/internal/kubeflow/` | Kubeflow Trainer TrainJob + Katib Experiment builders and status parsing |
 | `platform/internal/modelgate/` | Promotion gate (eval pass rate + reward vs deployed baseline) |
+| `platform/internal/experience/` | Fleet experience records + S3 keys (`training_data/v2/`) written by the processor, read by offline training |
 | `platform/internal/temporal/` | Temporal client, workflows, activities, Kafka ack bridge |
 | `platform/internal/billing/` | Pricing tiers |
 | `platform/internal/circuitbreaker/` | Circuit breaker for downstream calls |
@@ -141,7 +144,7 @@ python3 train_locomotion.py --job-id demo --timesteps 50000 \
 | `platform/observability/` | Prometheus, Grafana, alerting configs |
 | `platform/sdk/python/` | Python SDK (zero-dependency, typed) |
 | `platform/sdk/typescript/` | TypeScript SDK (typed interfaces) |
-| `platform/training/` | Model training pipelines |
+| `platform/training/` | Offline CQL trainer (pipeline), test-track evaluation, manual online/BC/autoencoder scripts |
 | `platform/analytics/` | Spark analytics pipeline |
 | `platform/docs/` | OpenAPI spec, `architecture.md` (Mermaid), `ml-pipeline.md` |
 | `platform/admin-web/` | React admin console (tenants, API keys, billing) |
@@ -267,6 +270,7 @@ python3 train_locomotion.py --job-id demo --timesteps 50000 \
 - Model versions are stored with `artifact_url` (S3 path), `metrics` (JSONB), and deployment timestamps.
 - The inference service loads models from S3 via the registry API; API inference requests carry the robot's assigned `artifact_url` (canary routing).
 - Promotion is gated (`internal/modelgate`): `POST /models/{id}/deploy` rejects unevaluated/failing models (422) and otherwise starts the Temporal canary (`ModelDeploymentWorkflow`); only its final step (`PromoteModel`) marks a model deployed.
+- Pipeline-trained models record their data lineage in `metrics` (`dataset_manifest`, `dataset_files`): the exact fleet-experience batches (`datasets/<job>/manifest.json`) they were trained on.
 
 ### SDK Requirements
 
@@ -292,7 +296,8 @@ Key variables (all have defaults for local dev):
 | `ARGO_SERVER_URL` | (empty = training off) | Argo Server REST API used by api + worker |
 | `MODEL_MIN_EVAL_PASS_RATE` | 0.5 | Promotion gate: minimum eval scenario pass rate |
 | `KUBEFLOW_ENABLED` | false | Worker submits Kubeflow TrainJobs / Katib Experiments (needs Trainer + Katib installed) |
-| `HPO_ALGORITHM` | tpe | Katib algorithm (also `HPO_MAX_TRIALS`=4, `HPO_PARALLEL_TRIALS`=2, `HPO_TRIAL_TIMESTEPS`=20000) |
+| `HPO_ALGORITHM` | tpe | Katib algorithm (also `HPO_MAX_TRIALS`=4, `HPO_PARALLEL_TRIALS`=2, `HPO_TRIAL_GRADIENT_STEPS`=2000, `HPO_EVAL_EPISODES`=5, `KUBEFLOW_TRAINING_SECRET`=fleetos-training) |
+| `TELEMETRY_BUCKET` | fleetos-telemetry | Worker: bucket holding fleet experience (`training_data/v2/`) for dataset snapshots |
 
 ## API Authentication
 

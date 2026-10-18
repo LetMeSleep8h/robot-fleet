@@ -14,8 +14,8 @@ var (
 	Experiments = kube.Resource{Group: "kubeflow.org", Version: "v1beta1", Resource: "experiments"}
 )
 
-// ObjectiveMetric is printed by train_locomotion.py ("eval_mean_reward=<x>")
-// and maximized by Katib.
+// ObjectiveMetric is printed by train_offline.py --eval-episodes
+// ("eval_mean_reward=<x>", measured on the MuJoCo test track) and maximized by Katib.
 const ObjectiveMetric = "eval_mean_reward"
 
 // API is the subset of the Kubernetes client the runner needs.
@@ -26,9 +26,10 @@ type API interface {
 
 // Config locates FleetOS training resources in the cluster.
 type Config struct {
-	Namespace string // namespace for TrainJobs and Experiments, e.g. "fleetos-training"
-	Runtime   string // ClusterTrainingRuntime name, e.g. "fleetos-sb3"
-	Image     string // training image used by Katib trials
+	Namespace      string // namespace for TrainJobs and Experiments, e.g. "fleetos-training"
+	Runtime        string // ClusterTrainingRuntime name, e.g. "fleetos-sb3"
+	Image          string // training image used by Katib trials
+	TrainingSecret string // secret with S3 credentials, mounted into trials (envFrom)
 }
 
 // TrainJobSpec describes one container run on the FleetOS training runtime.
@@ -46,14 +47,17 @@ type JobStatus struct {
 }
 
 // ExperimentSpec describes a Katib hyperparameter search over SearchSpace.
+// Each trial trains offline on the dataset snapshot, then scores the policy on
+// a few MuJoCo test-track episodes.
 type ExperimentSpec struct {
-	Name           string
-	Algorithm      string // Katib algorithm, e.g. "tpe", "random", "bayesianoptimization"
-	MaxTrials      int
-	ParallelTrials int
-	TrialTimesteps int // timesteps per trial (short runs; only the metric matters)
-	EnvID          string
-	Labels         map[string]string
+	Name               string
+	Algorithm          string // Katib algorithm, e.g. "tpe", "random", "bayesianoptimization"
+	MaxTrials          int
+	ParallelTrials     int
+	DatasetManifest    string // S3 key of the dataset snapshot (models bucket)
+	TrialGradientSteps int    // offline updates per trial (short; only the metric matters)
+	EvalEpisodes       int    // test-track episodes per trial for the objective
+	Labels             map[string]string
 }
 
 // ExperimentStatus is the state of a Katib Experiment.
@@ -70,15 +74,15 @@ type ExperimentStatus struct {
 type Hyperparameter struct {
 	Name       string   // Katib parameter name and results key, e.g. "learning_rate"
 	TrialParam string   // trial template placeholder, e.g. "learningRate"
-	Flag       string   // train_locomotion.py flag, e.g. "--learning-rate"
+	Flag       string   // train_offline.py flag, e.g. "--learning-rate"
 	Type       string   // Katib parameterType: double | int | categorical
 	Min, Max   string   // for double/int
 	List       []string // for categorical
 }
 
-// SearchSpace is the PPO hyperparameter space train_locomotion.py exposes.
+// SearchSpace is the offline CQL hyperparameter space train_offline.py exposes.
 var SearchSpace = []Hyperparameter{
-	{Name: "learning_rate", TrialParam: "learningRate", Flag: "--learning-rate", Type: "double", Min: "0.0001", Max: "0.003"},
-	{Name: "n_steps", TrialParam: "nSteps", Flag: "--n-steps", Type: "categorical", List: []string{"512", "1024", "2048"}},
-	{Name: "ent_coef", TrialParam: "entCoef", Flag: "--ent-coef", Type: "double", Min: "0.0", Max: "0.02"},
+	{Name: "learning_rate", TrialParam: "learningRate", Flag: "--learning-rate", Type: "double", Min: "0.0001", Max: "0.001"},
+	{Name: "cql_alpha", TrialParam: "cqlAlpha", Flag: "--cql-alpha", Type: "double", Min: "0.1", Max: "5.0"},
+	{Name: "batch_size", TrialParam: "batchSize", Flag: "--batch-size", Type: "categorical", List: []string{"128", "256", "512"}},
 }
