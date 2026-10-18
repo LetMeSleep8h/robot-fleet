@@ -16,10 +16,10 @@ type EventPublisher interface {
 
 // AgentDeploymentActivities holds dependencies for agent deployment Temporal activities.
 type AgentDeploymentActivities struct {
-	Agents         store.AgentRepository
-	Deployments    store.DeploymentRepository
-	Cache          store.CacheStore
-	EventProducer  EventPublisher // Kafka producer for deployment events (optional)
+	Agents        store.AgentRepository
+	Deployments   store.DeploymentRepository
+	Cache         store.CacheStore
+	EventProducer EventPublisher // Kafka producer for deployment events (optional)
 }
 
 // ValidateInput is the input for ValidateAgent.
@@ -43,11 +43,11 @@ func (a *AgentDeploymentActivities) ValidateAgent(ctx context.Context, input Val
 	}
 
 	report := map[string]any{
-		"agent_id":       agent.ID,
-		"agent_version":  agent.Version,
-		"checks_passed":  0,
-		"checks_total":   0,
-		"safety_valid":   false,
+		"agent_id":      agent.ID,
+		"agent_version": agent.Version,
+		"checks_passed": 0,
+		"checks_total":  0,
+		"safety_valid":  false,
 	}
 
 	// Check 1: safety envelope is non-empty
@@ -118,10 +118,10 @@ type CheckMetricsInput struct {
 
 // CheckMetricsOutput is returned by CheckDeploymentMetrics.
 type CheckMetricsOutput struct {
-	Healthy              bool    `json:"healthy"`
-	SafetyViolationRate  float64 `json:"safety_violation_rate"`
-	TaskFailureRate      float64 `json:"task_failure_rate"`
-	EstopCount           int     `json:"estop_count"`
+	Healthy             bool    `json:"healthy"`
+	SafetyViolationRate float64 `json:"safety_violation_rate"`
+	TaskFailureRate     float64 `json:"task_failure_rate"`
+	EstopCount          int     `json:"estop_count"`
 }
 
 // Rollback thresholds for canary agent deployments.

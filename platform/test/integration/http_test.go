@@ -110,8 +110,12 @@ func (c *testCache) PublishEvent(_ context.Context, channel string, data []byte)
 	return nil
 }
 func (c *testCache) Subscribe(_ context.Context, _ ...string) *redis.PubSub { return nil }
-func (c *testCache) SetCacheJSON(_ context.Context, _ string, _ []byte, _ time.Duration) error { return nil }
-func (c *testCache) GetCacheJSON(_ context.Context, _ string) ([]byte, error) { return nil, errors.New("miss") }
+func (c *testCache) SetCacheJSON(_ context.Context, _ string, _ []byte, _ time.Duration) error {
+	return nil
+}
+func (c *testCache) GetCacheJSON(_ context.Context, _ string) ([]byte, error) {
+	return nil, errors.New("miss")
+}
 func (c *testCache) CheckCommandDedup(_ context.Context, _ string) (int64, error) { return 0, nil }
 func (c *testCache) SetCommandDedup(_ context.Context, _ string, _ int64) error   { return nil }
 func (c *testCache) Close()                                                       {}

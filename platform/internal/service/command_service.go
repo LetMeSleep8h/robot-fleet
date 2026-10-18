@@ -78,12 +78,12 @@ func (s *robotService) sendCommandViaTemporal(ctx context.Context, robotID, cmdT
 		ID:        workflowID,
 		TaskQueue: temporalpkg.TaskQueueCommand,
 	}, workflows.CommandDispatchWorkflow, workflows.CommandWorkflowInput{
-		RobotID:  robotID,
+		RobotID:   robotID,
 		CommandID: commandID,
-		CmdType:  cmdType,
-		Params:   params,
-		TenantID: tenantID,
-		DedupKey: dedupKey,
+		CmdType:   cmdType,
+		Params:    params,
+		TenantID:  tenantID,
+		DedupKey:  dedupKey,
 	})
 	if err != nil {
 		// Temporal returns an error if workflow ID already exists → duplicate

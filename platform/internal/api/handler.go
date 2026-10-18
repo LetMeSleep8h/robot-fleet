@@ -12,15 +12,15 @@ import (
 )
 
 const (
-	DefaultListLimit  = 20
-	MaxListLimit      = 100
+	DefaultListLimit = 20
+	MaxListLimit     = 100
 )
 
 // Handler implements thin HTTP adapters that delegate to the service layer.
 type Handler struct {
 	svc     service.RobotService
-	cache   store.CacheStore   // for WebSocket subscription only
-	apiKeys *auth.APIKeyStore  // for WebSocket auth only
+	cache   store.CacheStore  // for WebSocket subscription only
+	apiKeys *auth.APIKeyStore // for WebSocket auth only
 }
 
 // NewHandler creates a new Handler with the given service and supporting dependencies.

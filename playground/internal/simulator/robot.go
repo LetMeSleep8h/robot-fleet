@@ -50,13 +50,13 @@ var HumanoidSpec = struct {
 
 // Physics constants for the humanoid simulation.
 const (
-	SimTickDuration    = 0.1     // seconds per simulation tick
-	BatteryIdleDrain   = 0.00002 // battery % per tick when idle
-	BatteryActiveDrain = 0.00008 // battery % per tick when walking/active
-	ThermalDecayRate   = 0.01    // rate at which CPU temp approaches target
-	GaitFrequencyHz    = 1.8     // human walking cadence in Hz
-	ChargingRate       = 0.0005  // battery % recovered per tick
-	LowBatteryThreshold = 0.15  // battery level that triggers charging
+	SimTickDuration     = 0.1     // seconds per simulation tick
+	BatteryIdleDrain    = 0.00002 // battery % per tick when idle
+	BatteryActiveDrain  = 0.00008 // battery % per tick when walking/active
+	ThermalDecayRate    = 0.01    // rate at which CPU temp approaches target
+	GaitFrequencyHz     = 1.8     // human walking cadence in Hz
+	ChargingRate        = 0.0005  // battery % recovered per tick
+	LowBatteryThreshold = 0.15    // battery level that triggers charging
 )
 
 // Robot simulates a single humanoid robot with realistic sensor output.
@@ -73,9 +73,9 @@ type Robot struct {
 	Yaw     float64
 
 	// Joints: position, velocity, torque (computed each step)
-	Joints         map[string]float64
-	JointVelocity  map[string]float64
-	JointTorque    map[string]float64
+	Joints        map[string]float64
+	JointVelocity map[string]float64
+	JointTorque   map[string]float64
 
 	// IMU sensor data
 	LinearAccelX float64 // m/s^2
@@ -86,9 +86,9 @@ type Robot struct {
 	AngularVelZ  float64
 
 	// Odometry
-	OdomVelX   float64 // m/s
-	OdomVelY   float64
-	OdomVelYaw float64 // rad/s
+	OdomVelX      float64 // m/s
+	OdomVelY      float64
+	OdomVelYaw    float64 // rad/s
 	DistanceTotal float64 // total meters traveled
 
 	// Foot force sensors (Newtons)
@@ -96,25 +96,25 @@ type Robot struct {
 	RightFootForce float64
 
 	// Internals
-	CPUTemp     float64 // Celsius
-	MotorTemp   float64
-	WiFiRSSI    int     // dBm
-	UptimeSecs  int64
+	CPUTemp    float64 // Celsius
+	MotorTemp  float64
+	WiFiRSSI   int // dBm
+	UptimeSecs int64
 
 	// Command state
-	Stopped   bool
-	TargetX   float64
-	TargetY   float64
-	HasTarget bool
-	Action    string // "" = idle, "walk", "dance", "wave", "bow", "sit", "jump", "look_around"
-	ActionTick int64 // tick when action started
+	Stopped    bool
+	TargetX    float64
+	TargetY    float64
+	HasTarget  bool
+	Action     string // "" = idle, "walk", "dance", "wave", "bow", "sit", "jump", "look_around"
+	ActionTick int64  // tick when action started
 
 	// Physics state
-	prevPosX float64
-	prevPosY float64
-	prevYaw  float64
-	tick     int64
-	rng      *rand.Rand
+	prevPosX  float64
+	prevPosY  float64
+	prevYaw   float64
+	tick      int64
+	rng       *rand.Rand
 	startTime time.Time
 }
 
@@ -233,7 +233,7 @@ func (r *Robot) Step() {
 		breathPhase := t * 0.3 * 2 * math.Pi // slow breathing ~0.3 Hz
 
 		// Standing pose: straight legs, arms at sides, slight sway
-		r.Joints["left_hip_pitch"] *= 0.9  // decay to zero
+		r.Joints["left_hip_pitch"] *= 0.9 // decay to zero
 		r.Joints["right_hip_pitch"] *= 0.9
 		r.Joints["left_knee"] = r.Joints["left_knee"]*0.9 + 0.05*0.1 // very slight bend
 		r.Joints["right_knee"] = r.Joints["right_knee"]*0.9 + 0.05*0.1
@@ -289,7 +289,7 @@ func (r *Robot) Step() {
 	r.LinearAccelX = r.OdomVelX/dt + r.rng.Float64()*0.1 // noise
 	r.LinearAccelY = r.OdomVelY/dt + r.rng.Float64()*0.1
 	r.LinearAccelZ = GravityAccel + r.rng.Float64()*0.05 // gravity + vibration
-	r.AngularVelX = r.rng.Float64() * 0.02  // slight body sway
+	r.AngularVelX = r.rng.Float64() * 0.02               // slight body sway
 	r.AngularVelY = r.rng.Float64() * 0.02
 	r.AngularVelZ = r.OdomVelYaw
 
@@ -591,10 +591,10 @@ func (r *Robot) Snapshot() *SensorSnapshot {
 		PosX: r.PosX, PosY: r.PosY, PosZ: r.PosZ, Yaw: r.Yaw,
 		BatteryLevel: r.Battery, BatteryVoltage: HumanoidSpec.BatteryV * r.Battery,
 		Joints: joints, JointVelocity: velocities, JointTorque: torques,
-		IMU: IMUData{r.LinearAccelX, r.LinearAccelY, r.LinearAccelZ, r.AngularVelX, r.AngularVelY, r.AngularVelZ},
+		IMU:       IMUData{r.LinearAccelX, r.LinearAccelY, r.LinearAccelZ, r.AngularVelX, r.AngularVelY, r.AngularVelZ},
 		Odometry:  OdomData{r.OdomVelX, r.OdomVelY, r.OdomVelYaw},
 		FootForce: FootForceData{r.LeftFootForce, r.RightFootForce},
-		CPUTemp: r.CPUTemp, MotorTemp: r.MotorTemp,
+		CPUTemp:   r.CPUTemp, MotorTemp: r.MotorTemp,
 		WiFiRSSI: r.WiFiRSSI, UptimeSecs: r.UptimeSecs,
 		DistanceTotal: r.DistanceTotal,
 	}

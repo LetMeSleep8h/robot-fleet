@@ -4,13 +4,13 @@ import "math"
 
 // Action duration limits in seconds.
 const (
-	DanceDuration     = 15.0
-	WaveDuration      = 5.0
-	BowDuration       = 5.5
+	DanceDuration      = 15.0
+	WaveDuration       = 5.0
+	BowDuration        = 5.5
 	LookAroundDuration = 8.0
-	StretchDuration   = 8.0
-	JumpDuration      = 11.0
-	GravityAccel      = 9.81
+	StretchDuration    = 8.0
+	JumpDuration       = 11.0
+	GravityAccel       = 9.81
 )
 
 // actionTime returns seconds since the current action started.

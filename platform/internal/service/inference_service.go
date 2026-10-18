@@ -168,8 +168,8 @@ func (s *robotService) forwardInferenceToRobot(ctx context.Context, robotID, ins
 
 	// Legacy fallback: direct Redis pub/sub
 	cmdData, err := json.Marshal(map[string]any{
-		"robot_id": robotID,
-		"command":  map[string]any{"type": cmdType, "params": params},
+		"robot_id":  robotID,
+		"command":   map[string]any{"type": cmdType, "params": params},
 		"issued_at": time.Now().UTC(),
 	})
 	if err != nil {

@@ -155,8 +155,8 @@ func (s *adminService) UpdateTenant(ctx context.Context, tenantID string, req Up
 }
 
 const (
-	apiKeyPrefix    = "fos_"
-	apiKeyRandBytes = 32
+	apiKeyPrefix     = "fos_"
+	apiKeyRandBytes  = 32
 	defaultRateLimit = 100
 )
 

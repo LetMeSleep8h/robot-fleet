@@ -43,12 +43,12 @@ func TestPricingTier_Unknown(t *testing.T) {
 
 func TestCalculateInvoice(t *testing.T) {
 	tests := []struct {
-		name       string
-		tier       string
-		apiCalls   int64
-		inference  int64
-		wantMin    float64
-		wantMax    float64
+		name      string
+		tier      string
+		apiCalls  int64
+		inference int64
+		wantMin   float64
+		wantMax   float64
 	}{
 		{"free within limits", "free", 500, 50, 0, 0},
 		{"free overage", "free", 2000, 200, 0, 50},

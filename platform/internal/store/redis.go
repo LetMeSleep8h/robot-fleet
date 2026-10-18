@@ -78,8 +78,8 @@ type RobotHotState struct {
 }
 
 const (
-	RobotStateTTL   = 5 * time.Minute  // TTL for cached robot hot state
-	UsageCounterTTL = 48 * time.Hour   // TTL for daily usage counters
+	RobotStateTTL   = 5 * time.Minute // TTL for cached robot hot state
+	UsageCounterTTL = 48 * time.Hour  // TTL for daily usage counters
 )
 
 func robotKey(robotID string) string {

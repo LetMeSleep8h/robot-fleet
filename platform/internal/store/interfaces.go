@@ -70,37 +70,37 @@ type WebhookRepository interface {
 
 // AgentRecord represents a registered agent payload.
 type AgentRecord struct {
-	ID              string         `json:"id"`
-	TenantID        string         `json:"tenant_id"`
-	Name            string         `json:"name"`
-	Version         string         `json:"version"`
-	Runtime         string         `json:"runtime"`
-	Entrypoint      string         `json:"entrypoint"`
-	ArtifactURL     string         `json:"artifact_url,omitempty"`
-	SafetyEnvelope  map[string]any `json:"safety_envelope"`
-	MotorSkills     []string       `json:"motor_skills"`
-	ModelDeps       []string       `json:"model_deps"`
-	Status          string         `json:"status"`
-	CreatedBy       string         `json:"created_by"`
-	CreatedAt       time.Time      `json:"created_at"`
-	UpdatedAt       time.Time      `json:"updated_at"`
+	ID             string         `json:"id"`
+	TenantID       string         `json:"tenant_id"`
+	Name           string         `json:"name"`
+	Version        string         `json:"version"`
+	Runtime        string         `json:"runtime"`
+	Entrypoint     string         `json:"entrypoint"`
+	ArtifactURL    string         `json:"artifact_url,omitempty"`
+	SafetyEnvelope map[string]any `json:"safety_envelope"`
+	MotorSkills    []string       `json:"motor_skills"`
+	ModelDeps      []string       `json:"model_deps"`
+	Status         string         `json:"status"`
+	CreatedBy      string         `json:"created_by"`
+	CreatedAt      time.Time      `json:"created_at"`
+	UpdatedAt      time.Time      `json:"updated_at"`
 }
 
 // DeploymentRecord represents an agent deployment.
 type DeploymentRecord struct {
-	ID                    string         `json:"id"`
-	AgentID               string         `json:"agent_id"`
-	TenantID              string         `json:"tenant_id"`
-	Status                string         `json:"status"`
-	Strategy              string         `json:"strategy"`
-	CanaryPercentage      int            `json:"canary_percentage"`
-	TargetFleet           []string       `json:"target_fleet"`
+	ID                     string         `json:"id"`
+	AgentID                string         `json:"agent_id"`
+	TenantID               string         `json:"tenant_id"`
+	Status                 string         `json:"status"`
+	Strategy               string         `json:"strategy"`
+	CanaryPercentage       int            `json:"canary_percentage"`
+	TargetFleet            []string       `json:"target_fleet"`
 	SafetyEnvelopeOverride map[string]any `json:"safety_envelope_override,omitempty"`
-	ValidationReport      map[string]any `json:"validation_report,omitempty"`
-	RollbackReason        string         `json:"rollback_reason,omitempty"`
-	InitiatedBy           string         `json:"initiated_by"`
-	InitiatedAt           time.Time      `json:"initiated_at"`
-	CompletedAt           *time.Time     `json:"completed_at,omitempty"`
+	ValidationReport       map[string]any `json:"validation_report,omitempty"`
+	RollbackReason         string         `json:"rollback_reason,omitempty"`
+	InitiatedBy            string         `json:"initiated_by"`
+	InitiatedAt            time.Time      `json:"initiated_at"`
+	CompletedAt            *time.Time     `json:"completed_at,omitempty"`
 }
 
 // DeploymentEventRecord represents a deployment state transition event.
@@ -209,12 +209,12 @@ type SafetyRepository interface {
 
 // SkillRecord represents a motor skill in the catalog.
 type SkillRecord struct {
-	ID             string   `json:"id"`
-	Name           string   `json:"name"`
-	Description    string   `json:"description"`
-	SkillType      string   `json:"skill_type"`
-	RequiredJoints []string `json:"required_joints"`
-	Version        string   `json:"version"`
+	ID             string    `json:"id"`
+	Name           string    `json:"name"`
+	Description    string    `json:"description"`
+	SkillType      string    `json:"skill_type"`
+	RequiredJoints []string  `json:"required_joints"`
+	Version        string    `json:"version"`
 	CreatedAt      time.Time `json:"created_at"`
 }
 

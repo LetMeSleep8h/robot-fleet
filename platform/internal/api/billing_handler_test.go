@@ -76,7 +76,7 @@ func (m *mockBillingCacheStore) GetUsageCounter(_ context.Context, _, _, _ strin
 	return 0, nil
 }
 func (m *mockBillingCacheStore) PublishEvent(_ context.Context, _ string, _ []byte) error { return nil }
-func (m *mockBillingCacheStore) Subscribe(_ context.Context, _ ...string) *redis.PubSub  { return nil }
+func (m *mockBillingCacheStore) Subscribe(_ context.Context, _ ...string) *redis.PubSub   { return nil }
 func (m *mockBillingCacheStore) SetCacheJSON(_ context.Context, _ string, _ []byte, _ time.Duration) error {
 	return nil
 }

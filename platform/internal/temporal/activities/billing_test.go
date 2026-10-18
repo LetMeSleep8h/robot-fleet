@@ -143,7 +143,7 @@ func (m *mockBillingCache) GetUsageCounter(_ context.Context, tenantID, metric, 
 	return m.counters[key], nil
 }
 func (m *mockBillingCache) PublishEvent(_ context.Context, _ string, _ []byte) error { return nil }
-func (m *mockBillingCache) Subscribe(_ context.Context, _ ...string) *redis.PubSub  { return nil }
+func (m *mockBillingCache) Subscribe(_ context.Context, _ ...string) *redis.PubSub   { return nil }
 func (m *mockBillingCache) SetCacheJSON(_ context.Context, _ string, _ []byte, _ time.Duration) error {
 	return nil
 }

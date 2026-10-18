@@ -146,7 +146,7 @@ func (f *Fleet) subscribeCommands(ctx context.Context) {
 				return
 			}
 			var cmd struct {
-				RobotID string         `json:"robot_id"`
+				RobotID string `json:"robot_id"`
 				Command struct {
 					Type   string         `json:"type"`
 					Params map[string]any `json:"params"`
