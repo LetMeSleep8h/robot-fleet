@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/dimuthu/robot-fleet/internal/config"
+	"github.com/dimuthu/robot-fleet/internal/experience"
 	"github.com/dimuthu/robot-fleet/internal/ingestion"
 	"github.com/dimuthu/robot-fleet/internal/middleware"
 	"github.com/dimuthu/robot-fleet/internal/service"
@@ -214,7 +215,7 @@ func main() {
 	}()
 
 	const (
-		s3BatchSize           = 100              // records per robot before S3 flush
+		s3BatchSize           = experience.TransitionsPerBatch // records per robot before S3 flush
 		s3FlushInterval       = 30 * time.Second // time-based flush to reduce data loss window
 		telemetryLogInterval  = 500              // log every N packets
 		postgresThrottleRatio = 50               // upsert robot metadata every N packets
@@ -256,12 +257,7 @@ func main() {
 		if len(buf) == 0 {
 			return
 		}
-		now := time.Now()
-		s3Key := fmt.Sprintf("training_data/%s/%s/transitions_%d.ndjson",
-			now.Format("2006/01/02/15"),
-			robotID,
-			now.UnixNano(),
-		)
+		s3Key := experience.ObjectKey(robotID, time.Now())
 		if err := s3.Put(ctx, s3Key, buf, "application/x-ndjson"); err != nil {
 			slog.Error("failed to flush training transitions", "robot", robotID, "error", err)
 		} else {
@@ -401,36 +397,12 @@ func main() {
 		}
 
 		// Write training transitions to S3 when training_context is present
-		if tc := state.GetTrainingContext(); tc != nil && len(tc.ActionTaken) > 0 {
-			objects := make([]map[string]any, 0, len(tc.Objects))
-			for _, obj := range tc.Objects {
-				objects = append(objects, map[string]any{
-					"name":  obj.Name,
-					"pos_x": obj.Position.GetX(), "pos_y": obj.Position.GetY(), "pos_z": obj.Position.GetZ(),
-					"vel_x": obj.Velocity.GetX(), "vel_y": obj.Velocity.GetY(), "vel_z": obj.Velocity.GetZ(),
-				})
+		if transition, ok := experience.BuildTransition(state, time.Now()); ok {
+			tLine, err := json.Marshal(transition)
+			if err != nil {
+				slog.Error("failed to encode training transition", "robot_id", pkt.RobotId, "error", err)
+				return nil
 			}
-			// Build joint arrays for the observation
-			jointPos := make([]float64, 0, len(state.Joints))
-			jointVel := make([]float64, 0, len(state.Joints))
-			for _, j := range state.Joints {
-				jointPos = append(jointPos, j.Position)
-				jointVel = append(jointVel, j.Velocity)
-			}
-			transition := map[string]any{
-				"robot_id":     state.RobotId,
-				"joint_pos":    jointPos,
-				"joint_vel":    jointVel,
-				"root_pos":     []float64{state.Pose.GetPosition().GetX(), state.Pose.GetPosition().GetY(), state.Pose.GetPosition().GetZ()},
-				"root_quat":    []float64{state.Pose.GetOrientation().GetX(), state.Pose.GetOrientation().GetY(), state.Pose.GetOrientation().GetZ(), state.Pose.GetOrientation().GetW()},
-				"action":       tc.ActionTaken,
-				"reward":       tc.StepReward,
-				"task_command": tc.TaskCommand,
-				"episode_done": tc.EpisodeDone,
-				"objects":      objects,
-				"ts":           time.Now().Unix(),
-			}
-			tLine, _ := json.Marshal(transition)
 			trainingBuffers[pkt.RobotId] = append(trainingBuffers[pkt.RobotId], tLine...)
 			trainingBuffers[pkt.RobotId] = append(trainingBuffers[pkt.RobotId], '\n')
 			trainingCounts[pkt.RobotId]++

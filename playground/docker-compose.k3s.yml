@@ -1,0 +1,19 @@
+# Override: run the playground against FleetOS on k3s (make k3s-up).
+#
+#   PLATFORM_HOST=$(colima ls -j | sed -n 's/.*"address":"\([^"]*\)".*/\1/p') \
+#     docker compose -f docker-compose.yml -f docker-compose.k3s.yml up -d simulator web
+#
+# k3s runs inside the Colima VM, so platform NodePorts are reached at the VM's
+# IP rather than host.docker.internal.
+services:
+  simulator:
+    environment:
+      GRPC_TARGET: "${PLATFORM_HOST:?set PLATFORM_HOST to the Colima VM IP}:30051"
+      INFERENCE_URL: "http://${PLATFORM_HOST}:30081"
+      S3_ENDPOINT: "${PLATFORM_HOST}:30900"
+
+  web:
+    environment:
+      VITE_API_URL: "http://${PLATFORM_HOST}:30880"
+      VITE_WS_URL: "ws://${PLATFORM_HOST}:30880"
+      VITE_SIM_URL: "http://simulator:8085"

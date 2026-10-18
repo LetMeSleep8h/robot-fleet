@@ -63,6 +63,15 @@ open http://localhost:5173
 
 The playground `docker-compose.yml` uses `host.docker.internal` to reach the platform k8s NodePorts (ingestion :30051, inference :30081, API :30880).
 
+### With Platform on k3s (Colima)
+
+k3s runs inside the Colima VM, so NodePorts are reached at the VM's IP (`colima list`), not `host.docker.internal`. The `docker-compose.k3s.yml` override sets that up:
+
+```bash
+PLATFORM_HOST=<colima-vm-ip> docker-compose -f docker-compose.yml -f docker-compose.k3s.yml up -d simulator web
+open http://localhost:5173
+```
+
 ## Services
 
 | Service | Port | Description |
@@ -110,31 +119,25 @@ Web UI ("walk forward") → POST /api/v1/inference
 - **Joint Visualizer** — Per-joint angle bars with torque indicators
 - **Telemetry Stream** — Raw telemetry event log
 
-## Experience Collection for RL Training
+## Fleet Experience for Offline Training
 
-The simulator doubles as an experience collector for offline RL. Every 5th physics step, it records a transition and periodically flushes to S3:
+Every robot's telemetry carries a training context, which the platform turns into the dataset its training pipeline learns from (no simulator in training):
 
 ```
-Simulator (50 Hz control loop)
+Simulator (50 Hz control loop, 10 Hz telemetry)
+  │  per telemetry record (training context):
+  │    observation = exact 86-dim policy input at this step
+  │    action      = 25-dim action actually applied (after exploration noise, clipped)
+  │    reward      = reward earned by that action until the robot's next record
+  │    episode_id / step, episode_done (a terminal record is sent on every fall)
+  │    exploration = whether the action included noise
   │
-  Every 5th step:
-  │  obs = 376-dim Humanoid-v4 observation
-  │       (qpos[2:], qvel, cinert, cvel, qfrc_actuator, cfrc_ext)
-  │  action = 17-dim MuJoCo control array (from command handler)
-  │  reward = forward_velocity + alive_bonus(5.0) - ctrl_cost(0.1·ctrl²)
-  │  done = height < 0.4m (fell)
+  gRPC telemetry → Ingestion → Kafka → Processor
   │
-  Buffer 500 transitions → flush to S3 as NDJSON
-  │
-  S3: fleetos-models/experience/{date}/{robot_id}/batch_{ts}.ndjson
+  S3: fleetos-telemetry/training_data/v2/{YYYY/MM/DD/HH}/{robot_id}/transitions_{ns}.ndjson
 ```
 
-Each NDJSON line:
-```json
-{"robot_id":"robot-0001","obs":[1.4,0.0,...],"action":[0.1,-0.2,...],"reward":5.12,"done":false,"ts":1774915677.5}
-```
-
-The training pipeline (`platform/training/train_locomotion.py`) can consume this via `--from-experience experience/` to pre-warm reward normalization and fine-tune from real robot data.
+A deterministic fraction of robots (`EXPLORATION_FRACTION`, default 0.2) adds Gaussian noise (`EXPLORATION_STD`, default 0.1) to their actions so the data isn't limited to what the current policy already does. The platform pipeline (`POST /api/v1/training/pipelines`) snapshots these batches and trains offline (CQL); MuJoCo is only used to evaluate the result.
 
 ## Environment Variables
 
@@ -145,8 +148,6 @@ The training pipeline (`platform/training/train_locomotion.py`) can consume this
 | `SIM_STEP_HZ` | 50 | Control loop rate (physics sub-steps 7x for real-time) |
 | `TELEMETRY_HZ` | 10 | Telemetry send rate |
 | `CONTROL_PORT` | 8085 | HTTP control server port |
-| `S3_ENDPOINT` | (empty) | MinIO/S3 endpoint for experience writing |
-| `S3_BUCKET` | fleetos-models | S3 bucket for experience batches |
-| `S3_ACCESS_KEY` | fleetos | S3 access key |
-| `S3_SECRET_KEY` | fleetos123 | S3 secret key |
+| `EXPLORATION_FRACTION` | 0.2 | Share of robots (chosen deterministically by ID) that add exploration noise |
+| `EXPLORATION_STD` | 0.1 | Std of the per-dimension Gaussian exploration noise |
 | `INFERENCE_URL` | http://inference:8081 | Inference service URL (use http://host.docker.internal:30081 for k8s) |

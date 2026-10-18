@@ -94,6 +94,9 @@ func (s *S3Store) List(ctx context.Context, prefix string, maxKeys int) ([]strin
 		Recursive: true,
 	}
 
+	// Cancelling stops minio's listing goroutine if we stop reading early.
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
 	for obj := range s.client.ListObjects(ctx, s.bucket, opts) {
 		if obj.Err != nil {
 			return nil, fmt.Errorf("s3 list %s: %w", prefix, obj.Err)

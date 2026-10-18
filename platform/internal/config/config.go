@@ -68,17 +68,20 @@ type Config struct {
 	ArgoToken              string
 	ArgoInsecureSkipVerify bool
 	ModelsBucket           string
+	TelemetryBucket        string  // fleet experience (training_data/) written by the processor
 	MinEvalPassRate        float64 // promotion gate: minimum eval scenario pass rate
 
 	// Kubeflow (Trainer TrainJobs + Katib HPO); opt-in
-	KubeflowEnabled   bool
-	KubeflowNamespace string
-	KubeflowRuntime   string // ClusterTrainingRuntime name
-	TrainingImage     string // image for Katib trials
-	HPOAlgorithm      string
-	HPOMaxTrials      int
-	HPOParallelTrials int
-	HPOTrialTimesteps int
+	KubeflowEnabled        bool
+	KubeflowNamespace      string
+	KubeflowRuntime        string // ClusterTrainingRuntime name
+	TrainingImage          string // image for Katib trials
+	KubeflowTrainingSecret string // S3 credentials secret mounted into Katib trials
+	HPOAlgorithm           string
+	HPOMaxTrials           int
+	HPOParallelTrials      int
+	HPOTrialGradientSteps  int // offline updates per Katib trial
+	HPOEvalEpisodes        int // test-track episodes per Katib trial (the objective)
 }
 
 func Load() *Config {
@@ -117,6 +120,7 @@ func Load() *Config {
 		ArgoToken:                 getEnv("ARGO_TOKEN", ""),
 		ArgoInsecureSkipVerify:    getEnv("ARGO_INSECURE_SKIP_VERIFY", "false") == "true",
 		ModelsBucket:              getEnv("MODELS_BUCKET", "fleetos-models"),
+		TelemetryBucket:           getEnv("TELEMETRY_BUCKET", "fleetos-telemetry"),
 		MinEvalPassRate:           getEnvFloat("MODEL_MIN_EVAL_PASS_RATE", modelgate.DefaultMinPassRate),
 		KubeflowEnabled:           getEnv("KUBEFLOW_ENABLED", "false") == "true",
 		KubeflowNamespace:         getEnv("KUBEFLOW_NAMESPACE", "fleetos-training"),
@@ -125,16 +129,19 @@ func Load() *Config {
 		HPOAlgorithm:              getEnv("HPO_ALGORITHM", defaultHPOAlgorithm),
 		HPOMaxTrials:              getEnvInt("HPO_MAX_TRIALS", defaultHPOMaxTrials),
 		HPOParallelTrials:         getEnvInt("HPO_PARALLEL_TRIALS", defaultHPOParallelTrials),
-		HPOTrialTimesteps:         getEnvInt("HPO_TRIAL_TIMESTEPS", defaultHPOTrialTimesteps),
+		HPOTrialGradientSteps:     getEnvInt("HPO_TRIAL_GRADIENT_STEPS", defaultHPOTrialGradientSteps),
+		HPOEvalEpisodes:           getEnvInt("HPO_EVAL_EPISODES", defaultHPOEvalEpisodes),
+		KubeflowTrainingSecret:    getEnv("KUBEFLOW_TRAINING_SECRET", "fleetos-training"),
 	}
 }
 
 // Katib defaults sized for CPU-only local clusters.
 const (
-	defaultHPOAlgorithm      = "tpe"
-	defaultHPOMaxTrials      = 4
-	defaultHPOParallelTrials = 2
-	defaultHPOTrialTimesteps = 20_000
+	defaultHPOAlgorithm          = "tpe"
+	defaultHPOMaxTrials          = 4
+	defaultHPOParallelTrials     = 2
+	defaultHPOTrialGradientSteps = 2_000
+	defaultHPOEvalEpisodes       = 5
 )
 
 func getEnvFloat(key string, fallback float64) float64 {

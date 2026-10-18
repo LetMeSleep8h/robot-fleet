@@ -15,6 +15,9 @@ minioStandalone:
   persistence:
     enabled: true
     size: 5Gi
+  # Fixed S3 API port so the playground simulator (docker compose) can write
+  # experience data from outside the cluster.
+  apiNodePort: 30900
 
 simulator:
   enabled: false

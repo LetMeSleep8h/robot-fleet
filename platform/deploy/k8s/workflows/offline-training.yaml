@@ -1,0 +1,83 @@
+# Offline training from fleet experience — the training path of the Temporal
+# pipeline (backend: argo). No simulator is used for training:
+#   train:    train_offline.py (CQL) on the dataset snapshot pinned by
+#             datasets/<job-id>/manifest.json → training/<job-id>/policy.zip
+#   evaluate: evaluate_policy.py on the MuJoCo "test track"
+#             → evaluations/<job-id>/eval_results.json (read by the gate)
+apiVersion: argoproj.io/v1alpha1
+kind: WorkflowTemplate
+metadata:
+  name: fleetos-offline-training
+spec:
+  entrypoint: train-and-eval
+  arguments:
+    parameters:
+      - name: job-id
+        value: "offline-default"
+      - name: dataset-manifest  # S3 key in the models bucket
+        value: ""
+      - name: gradient-steps
+        value: "20000"
+      - name: learning-rate
+        value: "0.0003"
+      - name: cql-alpha
+        value: "1.0"
+      - name: batch-size
+        value: "256"
+      - name: eval-env-id
+        value: "FleetOS-Humanoid-v2"
+
+  templates:
+    - name: train-and-eval
+      dag:
+        tasks:
+          - name: train
+            template: train
+          - name: evaluate
+            template: evaluate
+            dependencies: [train]
+
+    - name: train
+      container:
+        image: fleetos/training:latest
+        imagePullPolicy: Never
+        command: [python, train_offline.py]
+        args:
+          - "--job-id={{workflow.parameters.job-id}}"
+          - "--dataset-manifest={{workflow.parameters.dataset-manifest}}"
+          - "--gradient-steps={{workflow.parameters.gradient-steps}}"
+          - "--learning-rate={{workflow.parameters.learning-rate}}"
+          - "--cql-alpha={{workflow.parameters.cql-alpha}}"
+          - "--batch-size={{workflow.parameters.batch-size}}"
+          - "--output-dir=/tmp/output"
+        envFrom:
+          - secretRef:
+              name: fleetos-training
+        resources:
+          requests:
+            cpu: "2"
+            memory: 3Gi
+          limits:
+            cpu: "4"
+            memory: 6Gi
+
+    - name: evaluate
+      container:
+        image: fleetos/training:latest
+        imagePullPolicy: Never
+        command: [python, evaluate_policy.py]
+        args:
+          - "--eval-id={{workflow.parameters.job-id}}"
+          - "--model-path=s3://fleetos-models/training/{{workflow.parameters.job-id}}/policy.zip"
+          - "--env-id={{workflow.parameters.eval-env-id}}"
+          - "--output-dir=/tmp/eval"
+        envFrom:
+          - secretRef:
+              name: fleetos-training
+        resources:
+          requests:
+            cpu: "1"
+            memory: 2Gi
+          limits:
+            cpu: "2"
+            memory: 3Gi

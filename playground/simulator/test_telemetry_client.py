@@ -194,6 +194,34 @@ class TestTelemetryClientSendBehavior(unittest.TestCase):
             sys.modules["proto.telemetry_pb2"].RobotState = original
             _module.RobotState = original
 
+    def test_send_state_forwards_offline_rl_fields(self):
+        """The training context must carry the exact policy input and episode bookkeeping."""
+        client, stub = _make_client()
+
+        captured = {}
+        mock_tc = MagicMock(side_effect=lambda **kw: captured.update(kw))
+        original = _module.TrainingContext
+        _module.TrainingContext = mock_tc
+        try:
+            client.send_state({
+                "pos_x": 0.0, "pos_y": 0.0, "pos_z": 0.8,
+                "quat_x": 0.0, "quat_y": 0.0, "quat_z": 0.0, "quat_w": 1.0,
+                "joints": [], "battery": 0.9, "status": "active",
+            }, training_ctx={
+                "action_taken": [0.1] * 25, "step_reward": 1.5, "task_command": "walk",
+                "episode_done": True, "objects": [],
+                "observation": [0.2] * 86, "episode_id": "ep-1", "step": 7, "exploration": True,
+            })
+        finally:
+            _module.TrainingContext = original
+
+        self.assertEqual(captured["observation"], [0.2] * 86)
+        self.assertEqual(captured["episode_id"], "ep-1")
+        self.assertEqual(captured["step"], 7)
+        self.assertTrue(captured["exploration"])
+        self.assertTrue(captured["episode_done"])
+        self.assertEqual(captured["step_reward"], 1.5)
+
     def test_send_lidar_queues_packet(self):
         """send_lidar should put a packet on the queue."""
         client, stub = _make_client()

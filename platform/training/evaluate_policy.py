@@ -17,8 +17,22 @@ from pathlib import Path
 
 import gymnasium as gym
 import numpy as np
-from stable_baselines3 import PPO
+from stable_baselines3 import PPO, SAC
 from stable_baselines3.common.vec_env import DummyVecEnv, VecNormalize
+
+# Online (simulator) runs produce PPO; offline fleet-data runs produce SAC (CQL).
+POLICY_LOADERS = (("PPO", PPO), ("SAC", SAC))
+
+
+def load_policy(model_path: str):
+    """Load a policy of any supported algorithm. Returns (model, algorithm)."""
+    errors = []
+    for name, cls in POLICY_LOADERS:
+        try:
+            return cls.load(model_path), name
+        except Exception as e:  # noqa: BLE001 — try the next algorithm
+            errors.append(f"{name}: {e}")
+    raise RuntimeError(f"cannot load policy {model_path}: " + "; ".join(errors))
 
 
 # Scenario configurations: varied physics for robustness testing
@@ -75,14 +89,16 @@ def evaluate(args):
     print(f"[eval] Scenarios: {args.scenarios}")
 
     model_path = download_model(args)
-    model = PPO.load(model_path)
+    model, algorithm = load_policy(model_path)
+    print(f"[eval] Loaded {algorithm} policy")
 
     from fleetos_env import register_fleetos_env
     register_fleetos_env()
     env_id = args.env_id
     env = DummyVecEnv([lambda: gym.make(env_id)])
 
-    # Try to load normalizer
+    # Online PPO runs ship a normalizer; offline models train on raw
+    # observations (like inference) and have none.
     norm_path = Path(model_path).parent / "vec_normalize.pkl"
     if norm_path.exists():
         env = VecNormalize.load(str(norm_path), env)

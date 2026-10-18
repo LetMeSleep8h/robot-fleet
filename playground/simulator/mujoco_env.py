@@ -73,19 +73,24 @@ class LabSimulation:
                 "actuator_start": actuator_start,
                 "battery": 1.0,
                 "status": "active",
-                "prev_x": 0.0,
+                # Start from the spawn position: prev_x=0 credited a huge fake
+                # forward velocity on the first step after every spawn/reload.
+                "prev_x": float(self.data.qpos[qpos_start]),
                 "reward_accum": 0.0,
                 "episode_steps": 0,
                 "fall_count": 0,
                 "episode_count": 0,
                 "total_reward": 0.0,
                 "total_steps": 0,
+                "cum_reward": 0.0,  # monotonic (never reset); transition rewards are differences
             })
 
             log.info("Robot %s: qpos_start=%d, qvel_start=%d, act_start=%d",
                      self.robots[-1]["id"], qpos_start, qvel_start, actuator_start)
 
         mujoco.mj_step(self.model, self.data)
+        for robot in self.robots:  # re-sync after the settling step
+            robot["prev_x"] = float(self.data.qpos[robot["qpos_start"]])
         log.info("Model loaded: %d robots, %d actuators, %d qpos",
                  len(self.robots), self.model.nu, self.model.nq)
 
@@ -336,6 +341,7 @@ class LabSimulation:
             reward = self._compute_reward(robot, cmd, height, x_pos, dt, control_cost)
             robot["prev_x"] = x_pos
             robot["reward_accum"] += reward
+            robot["cum_reward"] += reward
             robot["episode_steps"] += 1
             robot["total_steps"] += 1
 

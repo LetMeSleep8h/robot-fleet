@@ -40,7 +40,6 @@ func RetrainingMonitorWorkflow(ctx workflow.Context, input RetrainingMonitorInpu
 		logger.Info("retraining triggered", "threshold", input.Threshold, "task_type", input.TaskType)
 		childCtx := workflow.WithChildOptions(ctx, workflow.ChildWorkflowOptions{})
 		err = workflow.ExecuteChildWorkflow(childCtx, TrainingPipelineWorkflow, TrainingPipelineInput{
-			Timesteps:  500_000,
 			TaskType:   input.TaskType,
 			AutoDeploy: true,
 		}).Get(ctx, nil)

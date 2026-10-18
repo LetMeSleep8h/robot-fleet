@@ -53,8 +53,13 @@ def main():
     from telemetry_client import TelemetryClient
     from observation import build_observation_from_mujoco
     from frame_server import start_server, set_spawn_callback, set_list_robots_callback
+    from exploration import Explorer
+    from transitions import TransitionRecorder
 
     sim = LabSimulation()
+    explorer = Explorer.from_env()
+    recorders: dict[str, TransitionRecorder] = {}
+    log.info("Exploration: fraction=%.2f std=%.2f", explorer.fraction, explorer.std)
     spawn_queue: queue.Queue[str] = queue.Queue()
     spawn_results: dict[str, dict] = {}
 
@@ -136,6 +141,11 @@ def main():
             robot_ids = sim.get_all_robot_ids()
             actions = {}
             task_commands = {}
+            # Telemetry/record ticks: a transition spans one telemetry interval.
+            record_tick = step % telemetry_every == 0
+            # Completed transitions (offline RL records) to attach to telemetry.
+            records: dict[str, list[dict]] = {}
+            episodes_before: dict[str, int] = {}
 
             for rid in robot_ids:
                 if rid not in tasks:
@@ -161,30 +171,48 @@ def main():
                     goal=task.current_goal,
                 )
 
-                # Use cached action (latest inference result)
-                actions[rid] = infer[rid].get_cached_action()
+                # Cached policy action (latest inference result), plus held
+                # exploration noise for exploration robots. The applied action
+                # is what gets recorded.
+                applied, explored = explorer.apply(
+                    rid, infer[rid].get_cached_action(), refresh=record_tick)
+                actions[rid] = applied
                 task_commands[rid] = task.current_task
 
-            # Step physics with task-conditional reward
+                rec = recorders.setdefault(rid, TransitionRecorder(rid))
+                episodes_before[rid] = robot["episode_count"]
+                records[rid] = rec.before_step(
+                    obs, applied, explored, robot["cum_reward"], record=record_tick)
+
+            # Step physics with task-conditional reward (falls reset robots inside)
             sim.step(actions, task_commands=task_commands)
             step += 1
 
-            # Send telemetry with training context
-            if step % telemetry_every == 0:
-                object_states = sim.get_object_states()
-                for rid in robot_ids:
-                    state = sim.get_robot_state(rid)
-                    if state:
-                        robot = sim._find_robot(rid)
-                        height = sim.data.qpos[robot["qpos_start"] + 2] if robot else 1.0
-                        training_ctx = {
-                            "action_taken": actions[rid].tolist() if rid in actions else [],
-                            "step_reward": robot.get("reward_accum", 0) / max(1, robot["episode_steps"]) if robot else 0.0,
-                            "task_command": task_commands.get(rid, "idle"),
-                            "episode_done": height < 0.3,
-                            "objects": object_states,
-                        }
-                        telemetry.send_state(state, robot_id=rid, training_ctx=training_ctx)
+            object_states = None
+            for rid in robot_ids:
+                robot = sim._find_robot(rid)
+                if not robot or rid not in recorders:
+                    continue
+                fell = robot["episode_count"] != episodes_before.get(rid, robot["episode_count"])
+                terminal = recorders[rid].after_step(robot["cum_reward"], fell=fell)
+                # Telemetry goes out on record ticks, and immediately on a fall
+                # so the terminal transition is not lost.
+                if not (record_tick or terminal):
+                    continue
+                state = sim.get_robot_state(rid)
+                if not state:
+                    continue
+                if object_states is None:
+                    object_states = sim.get_object_states()
+                pending = records.get(rid, []) + terminal
+                if not pending:
+                    telemetry.send_state(state, robot_id=rid)
+                for r in pending:
+                    telemetry.send_state(state, robot_id=rid, training_ctx={
+                        **r,
+                        "task_command": task_commands.get(rid, "idle"),
+                        "objects": object_states,
+                    })
 
             # LiDAR at 1 Hz
             if step % lidar_every == 0:

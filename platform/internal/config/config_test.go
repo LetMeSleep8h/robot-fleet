@@ -88,6 +88,9 @@ func TestLoad_MLOpsDefaults(t *testing.T) {
 	if cfg.ArgoServerURL != "" {
 		t.Errorf("training must be off unless ARGO_SERVER_URL is set, got %q", cfg.ArgoServerURL)
 	}
+	if cfg.TelemetryBucket != "fleetos-telemetry" {
+		t.Errorf("TelemetryBucket = %q", cfg.TelemetryBucket)
+	}
 	if cfg.ArgoNamespace != "argo" || cfg.ModelsBucket != "fleetos-models" {
 		t.Errorf("unexpected defaults: ns=%q bucket=%q", cfg.ArgoNamespace, cfg.ModelsBucket)
 	}
@@ -102,11 +105,12 @@ func TestLoad_MLOpsOverrides(t *testing.T) {
 	t.Setenv("ARGO_TOKEN", "tok")
 	t.Setenv("ARGO_INSECURE_SKIP_VERIFY", "true")
 	t.Setenv("MODELS_BUCKET", "models")
+	t.Setenv("TELEMETRY_BUCKET", "fleet-data")
 	t.Setenv("MODEL_MIN_EVAL_PASS_RATE", "0.8")
 
 	cfg := Load()
 	if cfg.ArgoServerURL != "https://argo-server.argo:2746" || cfg.ArgoNamespace != "ml" || cfg.ArgoToken != "tok" ||
-		!cfg.ArgoInsecureSkipVerify || cfg.ModelsBucket != "models" || cfg.MinEvalPassRate != 0.8 {
+		!cfg.ArgoInsecureSkipVerify || cfg.ModelsBucket != "models" || cfg.MinEvalPassRate != 0.8 || cfg.TelemetryBucket != "fleet-data" {
 		t.Errorf("overrides not applied: %+v", cfg)
 	}
 }
@@ -126,7 +130,8 @@ func TestLoad_KubeflowDefaults(t *testing.T) {
 	if cfg.KubeflowNamespace != "fleetos-training" || cfg.KubeflowRuntime != "fleetos-sb3" || cfg.TrainingImage != "fleetos/training:latest" {
 		t.Errorf("unexpected defaults: %+v", cfg)
 	}
-	if cfg.HPOAlgorithm != "tpe" || cfg.HPOMaxTrials != 4 || cfg.HPOParallelTrials != 2 || cfg.HPOTrialTimesteps != 20000 {
+	if cfg.HPOAlgorithm != "tpe" || cfg.HPOMaxTrials != 4 || cfg.HPOParallelTrials != 2 ||
+		cfg.HPOTrialGradientSteps != 2000 || cfg.HPOEvalEpisodes != 5 || cfg.KubeflowTrainingSecret != "fleetos-training" {
 		t.Errorf("unexpected HPO defaults: %+v", cfg)
 	}
 }
@@ -139,13 +144,16 @@ func TestLoad_KubeflowOverrides(t *testing.T) {
 	t.Setenv("HPO_ALGORITHM", "bayesianoptimization")
 	t.Setenv("HPO_MAX_TRIALS", "20")
 	t.Setenv("HPO_PARALLEL_TRIALS", "3")
-	t.Setenv("HPO_TRIAL_TIMESTEPS", "100000")
+	t.Setenv("HPO_TRIAL_GRADIENT_STEPS", "10000")
+	t.Setenv("HPO_EVAL_EPISODES", "10")
+	t.Setenv("KUBEFLOW_TRAINING_SECRET", "s3-creds")
 
 	cfg := Load()
 	if !cfg.KubeflowEnabled || cfg.KubeflowNamespace != "ml" || cfg.KubeflowRuntime != "gpu-runtime" || cfg.TrainingImage != "registry/training:v2" {
 		t.Errorf("kubeflow overrides not applied: %+v", cfg)
 	}
-	if cfg.HPOAlgorithm != "bayesianoptimization" || cfg.HPOMaxTrials != 20 || cfg.HPOParallelTrials != 3 || cfg.HPOTrialTimesteps != 100000 {
+	if cfg.HPOAlgorithm != "bayesianoptimization" || cfg.HPOMaxTrials != 20 || cfg.HPOParallelTrials != 3 ||
+		cfg.HPOTrialGradientSteps != 10000 || cfg.HPOEvalEpisodes != 10 || cfg.KubeflowTrainingSecret != "s3-creds" {
 		t.Errorf("HPO overrides not applied: %+v", cfg)
 	}
 }

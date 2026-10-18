@@ -19,6 +19,8 @@ runs the Temporal training pipeline. Both talk to the Argo Server REST API.
 {{- end }}
 - name: MODELS_BUCKET
   value: {{ .Values.training.modelsBucket | default "fleetos-models" | quote }}
+- name: TELEMETRY_BUCKET
+  value: {{ .Values.training.telemetryBucket | default "fleetos-telemetry" | quote }}
 - name: MODEL_MIN_EVAL_PASS_RATE
   value: {{ .Values.training.minEvalPassRate | default "0.5" | toString | quote }}
 - name: KUBEFLOW_ENABLED
@@ -36,7 +38,11 @@ runs the Temporal training pipeline. Both talk to the Argo Server REST API.
   value: {{ .Values.kubeflow.hpo.maxTrials | toString | quote }}
 - name: HPO_PARALLEL_TRIALS
   value: {{ .Values.kubeflow.hpo.parallelTrials | toString | quote }}
-- name: HPO_TRIAL_TIMESTEPS
-  value: {{ .Values.kubeflow.hpo.trialTimesteps | toString | quote }}
+- name: HPO_TRIAL_GRADIENT_STEPS
+  value: {{ .Values.kubeflow.hpo.trialGradientSteps | toString | quote }}
+- name: HPO_EVAL_EPISODES
+  value: {{ .Values.kubeflow.hpo.evalEpisodes | toString | quote }}
+- name: KUBEFLOW_TRAINING_SECRET
+  value: {{ .Values.kubeflow.trainingSecret | default "fleetos-training" | quote }}
 {{- end }}
 {{- end -}}

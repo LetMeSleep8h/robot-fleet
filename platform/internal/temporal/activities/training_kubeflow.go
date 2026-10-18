@@ -27,10 +27,11 @@ const (
 
 // Default Katib search settings (small: this is CPU-only local hardware).
 const (
-	DefaultHPOAlgorithm      = "tpe"
-	DefaultHPOMaxTrials      = 4
-	DefaultHPOParallelTrials = 2
-	DefaultHPOTrialTimesteps = 20_000
+	DefaultHPOAlgorithm          = "tpe"
+	DefaultHPOMaxTrials          = 4
+	DefaultHPOParallelTrials     = 2
+	DefaultHPOTrialGradientSteps = 2_000
+	DefaultHPOEvalEpisodes       = 5
 )
 
 // KubeflowRunner submits and tracks Kubeflow TrainJobs and Katib Experiments
@@ -44,32 +45,22 @@ type KubeflowRunner interface {
 
 // HPOSettings configures Katib hyperparameter searches.
 type HPOSettings struct {
-	Algorithm      string
-	MaxTrials      int
-	ParallelTrials int
-	TrialTimesteps int
+	Algorithm          string
+	MaxTrials          int
+	ParallelTrials     int
+	TrialGradientSteps int // offline updates per trial
+	EvalEpisodes       int // test-track episodes per trial (the objective)
 }
 
 // DefaultHPOSettings returns the default Katib search settings.
 func DefaultHPOSettings() HPOSettings {
 	return HPOSettings{
-		Algorithm:      DefaultHPOAlgorithm,
-		MaxTrials:      DefaultHPOMaxTrials,
-		ParallelTrials: DefaultHPOParallelTrials,
-		TrialTimesteps: DefaultHPOTrialTimesteps,
+		Algorithm:          DefaultHPOAlgorithm,
+		MaxTrials:          DefaultHPOMaxTrials,
+		ParallelTrials:     DefaultHPOParallelTrials,
+		TrialGradientSteps: DefaultHPOTrialGradientSteps,
+		EvalEpisodes:       DefaultHPOEvalEpisodes,
 	}
-}
-
-// kubeflowScripts are the train/evaluate entry points per task type.
-type kubeflowScripts struct {
-	train, eval string
-	envFlag     bool // training script accepts --env-id
-	tunable     bool // training script exposes kubeflow.SearchSpace flags
-}
-
-var kubeflowTasks = map[string]kubeflowScripts{
-	"locomotion": {train: "train_locomotion.py", eval: "evaluate_policy.py", envFlag: true, tunable: true},
-	"reach":      {train: "train_reach.py", eval: "evaluate_reach.py"},
 }
 
 var invalidNameChars = regexp.MustCompile(`[^a-z0-9-]+`)
@@ -93,24 +84,17 @@ func kubeName(prefix, jobID string, maxLen int) string {
 	return strings.TrimRight(name[:maxLen-nameHashLen-1], "-") + "-" + suffix
 }
 
-// submitKubeflowRun trains with a TrainJob, then evaluates the uploaded policy
-// with a second TrainJob that writes evaluations/<job-id>/eval_results.json.
+// submitKubeflowRun trains offline with a TrainJob (train_offline.py, no
+// simulator), then evaluates the uploaded policy on the MuJoCo test track with
+// a second TrainJob that writes evaluations/<job-id>/eval_results.json.
 func (a *TrainingActivities) submitKubeflowRun(ctx context.Context, input SubmitTrainingRunInput) (*SubmitTrainingRunOutput, error) {
 	if a.Kubeflow == nil {
 		return nil, temporal.NewNonRetryableApplicationError(
 			"kubeflow backend not configured (set KUBEFLOW_ENABLED=true)", ErrTypeTrainingNotConfigured, nil)
 	}
-	scripts, ok := kubeflowTasks[input.TaskType]
-	switch {
-	case !ok:
+	if input.DatasetManifest == "" {
 		return nil, temporal.NewNonRetryableApplicationError(
-			fmt.Sprintf("no kubeflow training for task type %q (supported: locomotion, reach)", input.TaskType), ErrTypeUnsupportedTraining, nil)
-	case len(input.Hyperparameters) > 0 && !scripts.tunable:
-		return nil, temporal.NewNonRetryableApplicationError(
-			fmt.Sprintf("task type %q has no tunable hyperparameters", input.TaskType), ErrTypeUnsupportedTraining, nil)
-	case input.BaseModel != "" || input.FromExperience != "":
-		return nil, temporal.NewNonRetryableApplicationError(
-			"fine-tuning and experience data are not supported yet", ErrTypeUnsupportedTraining, nil)
+			"training run needs a dataset manifest (run SnapshotDataset first)", ErrTypeUnsupportedTraining, nil)
 	}
 	hpArgs, err := kubeflow.HyperparameterArgs(input.Hyperparameters)
 	if err != nil {
@@ -118,12 +102,14 @@ func (a *TrainingActivities) submitKubeflowRun(ctx context.Context, input Submit
 	}
 
 	labels := map[string]string{LabelJobID: kubeName("", input.JobID, maxKubeNameLen)}
-	trainCmd := []string{"python", scripts.train, "--job-id=" + input.JobID, "--output-dir=/tmp/output"}
-	if input.Timesteps > 0 {
-		trainCmd = append(trainCmd, "--timesteps="+strconv.Itoa(input.Timesteps))
+	trainCmd := []string{
+		"python", "train_offline.py",
+		"--job-id=" + input.JobID,
+		"--dataset-manifest=" + input.DatasetManifest,
+		"--output-dir=/tmp/output",
 	}
-	if scripts.envFlag && input.EnvID != "" {
-		trainCmd = append(trainCmd, "--env-id="+input.EnvID)
+	if input.GradientSteps > 0 {
+		trainCmd = append(trainCmd, "--gradient-steps="+strconv.Itoa(input.GradientSteps))
 	}
 	trainCmd = append(trainCmd, hpArgs...)
 
@@ -133,13 +119,11 @@ func (a *TrainingActivities) submitKubeflowRun(ctx context.Context, input Submit
 	}
 
 	evalCmd := []string{
-		"python", scripts.eval,
+		"python", "evaluate_policy.py",
 		"--eval-id=" + input.JobID,
 		fmt.Sprintf("--model-path=s3://%s/%s", a.ModelsBucket, ModelArtifactKey(input.JobID)),
+		"--env-id=" + EvalEnvID,
 		"--output-dir=/tmp/eval",
-	}
-	if scripts.envFlag && input.EnvID != "" {
-		evalCmd = append(evalCmd, "--env-id="+input.EnvID)
 	}
 	if err := a.runTrainJob(ctx, kubeflow.TrainJobSpec{Name: kubeName("eval", input.JobID, maxKubeNameLen), Command: evalCmd, Labels: labels}); err != nil {
 		return nil, err
@@ -171,9 +155,8 @@ func (a *TrainingActivities) runTrainJob(ctx context.Context, spec kubeflow.Trai
 
 // HyperparameterSearchInput is the input for RunHyperparameterSearch.
 type HyperparameterSearchInput struct {
-	JobID    string `json:"job_id"`
-	TaskType string `json:"task_type"`
-	EnvID    string `json:"env_id"`
+	JobID           string `json:"job_id"`
+	DatasetManifest string `json:"dataset_manifest"`
 }
 
 // HyperparameterSearchOutput is Katib's best trial.
@@ -184,27 +167,29 @@ type HyperparameterSearchOutput struct {
 	BestObjective float64           `json:"best_objective"`
 }
 
-// RunHyperparameterSearch runs a Katib Experiment over the task's tunable
-// hyperparameters and returns the best trial's assignments.
+// RunHyperparameterSearch runs a Katib Experiment of short offline trials on
+// the dataset snapshot, each scored on the test track, and returns the best
+// trial's hyperparameters.
 func (a *TrainingActivities) RunHyperparameterSearch(ctx context.Context, input HyperparameterSearchInput) (*HyperparameterSearchOutput, error) {
 	if a.Kubeflow == nil {
 		return nil, temporal.NewNonRetryableApplicationError(
 			"katib not configured (set KUBEFLOW_ENABLED=true)", ErrTypeTrainingNotConfigured, nil)
 	}
-	if scripts, ok := kubeflowTasks[input.TaskType]; !ok || !scripts.tunable {
+	if input.DatasetManifest == "" {
 		return nil, temporal.NewNonRetryableApplicationError(
-			fmt.Sprintf("task type %q has no tunable hyperparameters", input.TaskType), ErrTypeUnsupportedTraining, nil)
+			"hyperparameter search needs a dataset manifest", ErrTypeUnsupportedTraining, nil)
 	}
 
 	name := kubeName("hpo", input.JobID, maxKatibNameLen)
 	spec := kubeflow.ExperimentSpec{
-		Name:           name,
-		Algorithm:      a.HPO.Algorithm,
-		MaxTrials:      a.HPO.MaxTrials,
-		ParallelTrials: a.HPO.ParallelTrials,
-		TrialTimesteps: a.HPO.TrialTimesteps,
-		EnvID:          input.EnvID,
-		Labels:         map[string]string{LabelJobID: kubeName("", input.JobID, maxKubeNameLen)},
+		Name:               name,
+		Algorithm:          a.HPO.Algorithm,
+		MaxTrials:          a.HPO.MaxTrials,
+		ParallelTrials:     a.HPO.ParallelTrials,
+		DatasetManifest:    input.DatasetManifest,
+		TrialGradientSteps: a.HPO.TrialGradientSteps,
+		EvalEpisodes:       a.HPO.EvalEpisodes,
+		Labels:             map[string]string{LabelJobID: kubeName("", input.JobID, maxKubeNameLen)},
 	}
 	if _, err := a.Kubeflow.SubmitExperiment(ctx, spec); err != nil && !errors.Is(err, kube.ErrAlreadyExists) {
 		return nil, fmt.Errorf("submit katib experiment %s: %w", name, err)

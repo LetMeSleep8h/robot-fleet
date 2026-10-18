@@ -33,16 +33,20 @@ const (
 	ErrTypeTrainingRunFailed     = "TrainingRunFailed"
 )
 
-// trainingTemplates maps a task type to its Argo WorkflowTemplate. Each
-// template trains, uploads training/<job-id>/policy.zip and then evaluates it,
-// uploading evaluations/<job-id>/eval_results.json.
-var trainingTemplates = map[string]string{
-	"locomotion": "fleetos-locomotion-training",
-	"reach":      "fleetos-reach-training",
-}
+// OfflineTrainingTemplate is the Argo WorkflowTemplate that trains offline
+// from a dataset snapshot (no simulator), uploads training/<job-id>/policy.zip,
+// then evaluates it on the MuJoCo test track into evaluations/<job-id>/.
+const OfflineTrainingTemplate = "fleetos-offline-training"
 
-// templatesWithEnvParam lists templates that accept an env-id parameter.
-var templatesWithEnvParam = map[string]bool{"fleetos-locomotion-training": true}
+// EvalEnvID is the MuJoCo "test track" every candidate is evaluated on.
+const EvalEnvID = "FleetOS-Humanoid-v2"
+
+// argoHyperparameterParams maps tunable hyperparameters to template parameters.
+var argoHyperparameterParams = map[string]string{
+	"learning_rate": "learning-rate",
+	"cql_alpha":     "cql-alpha",
+	"batch_size":    "batch-size",
+}
 
 // WorkflowRunner submits and tracks Argo workflows (implemented by *argo.Client).
 type WorkflowRunner interface {
@@ -50,9 +54,15 @@ type WorkflowRunner interface {
 	GetWorkflowStatus(ctx context.Context, name string) (argo.Status, error)
 }
 
-// ArtifactReader reads training artifacts from the models bucket.
-type ArtifactReader interface {
+// ArtifactStore reads and writes training artifacts in the models bucket.
+type ArtifactStore interface {
 	Get(ctx context.Context, key string) ([]byte, error)
+	Put(ctx context.Context, key string, data []byte, contentType string) error
+}
+
+// DatasetLister lists fleet experience batches in the telemetry bucket.
+type DatasetLister interface {
+	List(ctx context.Context, prefix string, maxKeys int) ([]string, error)
 }
 
 // Training backends.
@@ -65,15 +75,17 @@ const (
 // A nil Runner/Kubeflow means that backend is not configured: runs fail
 // instead of faking success.
 type TrainingActivities struct {
-	Models       store.ModelRepository
-	Robots       store.RobotRepository
-	Runner       WorkflowRunner
-	Kubeflow     KubeflowRunner
-	HPO          HPOSettings
-	ModelsBucket string // bucket holding training artifacts (for eval model paths)
-	Artifacts    ArtifactReader
-	Gate         modelgate.Policy
-	PollInterval time.Duration
+	Models        store.ModelRepository
+	Robots        store.RobotRepository
+	Runner        WorkflowRunner
+	Kubeflow      KubeflowRunner
+	HPO           HPOSettings
+	ModelsBucket  string // bucket holding training artifacts (for eval model paths)
+	Artifacts     ArtifactStore
+	Dataset       DatasetLister // fleet experience (telemetry bucket, training_data/)
+	DatasetBucket string
+	Gate          modelgate.Policy
+	PollInterval  time.Duration
 }
 
 // ModelArtifactKey is where a training job uploads its policy.
@@ -84,40 +96,13 @@ func EvalResultsKey(jobID string) string {
 	return fmt.Sprintf("evaluations/%s/eval_results.json", jobID)
 }
 
-// CollectExperienceInput is the input for CollectExperienceStats.
-type CollectExperienceInput struct {
-	S3Bucket string `json:"s3_bucket"`
-	Prefix   string `json:"prefix"` // e.g. "experience/"
-}
-
-// CollectExperienceOutput reports available experience data.
-type CollectExperienceOutput struct {
-	TransitionCount int    `json:"transition_count"` // estimated
-	DateRange       string `json:"date_range"`
-}
-
-// CollectExperienceStats checks how much experience data is available in S3.
-// Placeholder: returns a fixed estimate. The training templates cannot consume
-// experience data yet, so SubmitTrainingRun rejects runs that ask for it.
-func (a *TrainingActivities) CollectExperienceStats(ctx context.Context, input CollectExperienceInput) (*CollectExperienceOutput, error) {
-	slog.Info("checking experience data", "bucket", input.S3Bucket, "prefix", input.Prefix)
-	return &CollectExperienceOutput{
-		TransitionCount: 5000,
-		DateRange:       time.Now().AddDate(0, 0, -7).Format("2006-01-02") + " to " + time.Now().Format("2006-01-02"),
-	}, nil
-}
-
 // SubmitTrainingRunInput is the input for SubmitTrainingRun.
 type SubmitTrainingRunInput struct {
 	JobID           string            `json:"job_id"`
-	Timesteps       int               `json:"timesteps"`
-	EnvID           string            `json:"env_id"`
-	BaseModel       string            `json:"base_model"`      // S3 key for fine-tuning (not supported yet)
-	FromExperience  string            `json:"from_experience"` // S3 prefix for experience data (not supported yet)
-	TaskType        string            `json:"task_type"`       // "locomotion" or "reach"
-	Algorithm       string            `json:"algorithm"`
+	DatasetManifest string            `json:"dataset_manifest"`          // from SnapshotDataset
+	GradientSteps   int               `json:"gradient_steps"`            // 0 = trainer default
 	Backend         string            `json:"backend"`                   // BackendArgo (default) or BackendKubeflow
-	Hyperparameters map[string]string `json:"hyperparameters,omitempty"` // e.g. Katib's best trial (kubeflow backend)
+	Hyperparameters map[string]string `json:"hyperparameters,omitempty"` // e.g. Katib's best trial
 }
 
 // SubmitTrainingRunOutput is the result of a completed training run.
@@ -127,9 +112,9 @@ type SubmitTrainingRunOutput struct {
 	ModelPath string `json:"model_path"`
 }
 
-// SubmitTrainingRun submits the task's Argo WorkflowTemplate and blocks until
-// the workflow finishes, heartbeating the workflow name so a retried attempt
-// resumes polling the same run instead of submitting a duplicate.
+// SubmitTrainingRun trains a policy offline from the dataset snapshot (no
+// simulator) and evaluates it on the test track, on the chosen backend. It
+// blocks until done; retries resume the same run instead of duplicating it.
 func (a *TrainingActivities) SubmitTrainingRun(ctx context.Context, input SubmitTrainingRunInput) (*SubmitTrainingRunOutput, error) {
 	switch input.Backend {
 	case "", BackendArgo:
@@ -142,12 +127,14 @@ func (a *TrainingActivities) SubmitTrainingRun(ctx context.Context, input Submit
 	}
 }
 
+// submitArgoRun runs OfflineTrainingTemplate, heartbeating the workflow name
+// so a retried attempt resumes polling the same run.
 func (a *TrainingActivities) submitArgoRun(ctx context.Context, input SubmitTrainingRunInput) (*SubmitTrainingRunOutput, error) {
 	if a.Runner == nil {
 		return nil, temporal.NewNonRetryableApplicationError(
 			"training runner not configured (set ARGO_SERVER_URL)", ErrTypeTrainingNotConfigured, nil)
 	}
-	template, err := validateTrainingRun(input)
+	params, err := argoTrainingParams(input)
 	if err != nil {
 		return nil, err
 	}
@@ -156,18 +143,11 @@ func (a *TrainingActivities) submitArgoRun(ctx context.Context, input SubmitTrai
 	if activity.HasHeartbeatDetails(ctx) && activity.GetHeartbeatDetails(ctx, &name) == nil && name != "" {
 		slog.Info("resuming training run", "job_id", input.JobID, "workflow", name)
 	} else {
-		params := map[string]string{"job-id": input.JobID}
-		if input.Timesteps > 0 {
-			params["timesteps"] = strconv.Itoa(input.Timesteps)
-		}
-		if input.EnvID != "" && templatesWithEnvParam[template] {
-			params["env-id"] = input.EnvID
-		}
-		name, err = a.Runner.SubmitTemplate(ctx, template, params, map[string]string{LabelJobID: input.JobID})
+		name, err = a.Runner.SubmitTemplate(ctx, OfflineTrainingTemplate, params, map[string]string{LabelJobID: input.JobID})
 		if err != nil {
 			return nil, fmt.Errorf("submit training run %s: %w", input.JobID, err)
 		}
-		slog.Info("training run submitted", "job_id", input.JobID, "workflow", name, "template", template)
+		slog.Info("training run submitted", "job_id", input.JobID, "workflow", name, "dataset", input.DatasetManifest)
 	}
 	activity.RecordHeartbeat(ctx, name)
 
@@ -183,22 +163,24 @@ func (a *TrainingActivities) submitArgoRun(ctx context.Context, input SubmitTrai
 	return &SubmitTrainingRunOutput{RunID: name, Status: status.Phase, ModelPath: ModelArtifactKey(input.JobID)}, nil
 }
 
-func validateTrainingRun(input SubmitTrainingRunInput) (string, error) {
-	unsupported := func(msg string) error {
-		return temporal.NewNonRetryableApplicationError(msg, ErrTypeUnsupportedTraining, nil)
+func argoTrainingParams(input SubmitTrainingRunInput) (map[string]string, error) {
+	if input.DatasetManifest == "" {
+		return nil, temporal.NewNonRetryableApplicationError(
+			"training run needs a dataset manifest (run SnapshotDataset first)", ErrTypeUnsupportedTraining, nil)
 	}
-	template, ok := trainingTemplates[input.TaskType]
-	switch {
-	case !ok:
-		return "", unsupported(fmt.Sprintf("no training template for task type %q (supported: locomotion, reach)", input.TaskType))
-	case len(input.Hyperparameters) > 0:
-		return "", unsupported("custom hyperparameters require the kubeflow backend")
-	case input.BaseModel != "":
-		return "", unsupported("fine-tuning from a base model is not supported by the training templates")
-	case input.FromExperience != "":
-		return "", unsupported("training from collected experience is not supported by the training templates")
+	params := map[string]string{"job-id": input.JobID, "dataset-manifest": input.DatasetManifest}
+	if input.GradientSteps > 0 {
+		params["gradient-steps"] = strconv.Itoa(input.GradientSteps)
 	}
-	return template, nil
+	for name, value := range input.Hyperparameters {
+		param, ok := argoHyperparameterParams[name]
+		if !ok {
+			return nil, temporal.NewNonRetryableApplicationError(
+				fmt.Sprintf("unknown hyperparameter %q", name), ErrTypeUnsupportedTraining, nil)
+		}
+		params[param] = value
+	}
+	return params, nil
 }
 
 // waitForWorkflow polls until the workflow reaches a terminal phase.
@@ -341,6 +323,9 @@ type RegisterTrainedModelInput struct {
 	Backend         string            `json:"backend"`
 	Hyperparameters map[string]string `json:"hyperparameters,omitempty"`
 	HPOExperiment   string            `json:"hpo_experiment,omitempty"`
+	// Data lineage: the fleet-experience snapshot the model was trained on.
+	DatasetManifest string `json:"dataset_manifest,omitempty"`
+	DatasetFiles    int    `json:"dataset_files,omitempty"`
 }
 
 // RegisterTrainedModel registers a trained model in the model registry as staged.
@@ -369,6 +354,10 @@ func (a *TrainingActivities) RegisterTrainedModel(ctx context.Context, input Reg
 	}
 	if input.HPOExperiment != "" {
 		model.Metrics["hpo_experiment"] = input.HPOExperiment
+	}
+	if input.DatasetManifest != "" {
+		model.Metrics["dataset_manifest"] = input.DatasetManifest
+		model.Metrics["dataset_files"] = input.DatasetFiles
 	}
 
 	if err := a.Models.RegisterModel(ctx, model); err != nil {

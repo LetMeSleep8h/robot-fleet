@@ -151,7 +151,7 @@ open http://localhost:8123   # ClickHouse (direct SQL)
 | `GET` | `/api/v1/fleet/metrics` | Aggregated fleet stats |
 | `POST` | `/api/v1/models` | Register model (staged) |
 | `POST` | `/api/v1/models/{id}/deploy` | Gate + start canary → `202 {workflow_id}`; `422` gate rejection, `409` not staged, `503` without Temporal |
-| `POST` | `/api/v1/training/pipelines` | Start training pipeline (`backend: argo\|kubeflow`, `use_katib`, `auto_deploy`) → `202` |
+| `POST` | `/api/v1/training/pipelines` | Start offline training pipeline (`task_type`, `gradient_steps`, `min_transitions`, `max_dataset_files`, `backend: argo\|kubeflow`, `use_katib`, `auto_deploy`) → `202` |
 | `GET` | `/api/v1/training/pipelines/{id}` | Pipeline status + result |
 | `POST` | `/api/v1/locomotion/jobs` | Submit a single Argo training job (`503` if training not configured) |
 | `GET` | `/api/v1/billing/subscription` | Current subscription |
@@ -254,30 +254,38 @@ Processor starts Temporal workflow → Redis → Ingestion → gRPC StreamComman
 
 Watch inference: `docker logs -f platform-inference-1`
 
-## ML Training Pipeline (Temporal + Argo / Kubeflow)
+## ML Training Pipeline (offline, from fleet experience)
 
-Training is orchestrated by Temporal and executed either by Argo Workflows (default) or by Kubeflow Trainer, optionally after a Katib hyperparameter search. Start a run with `POST /api/v1/training/pipelines` and poll `GET /api/v1/training/pipelines/{id}`. Everything below has been verified on local k3s (CPU only).
+The pipeline learns from what the robots actually did — not from a simulator. It is orchestrated by Temporal and runs on Argo Workflows (default) or Kubeflow Trainer, optionally after a Katib hyperparameter search. MuJoCo is used only as the evaluation "test track". Start a run with `POST /api/v1/training/pipelines` and poll `GET /api/v1/training/pipelines/{id}`.
 
 ```
 Temporal TrainingPipelineWorkflow (fleetos-training queue)
   │
+  ├─ SnapshotDataset — lists s3://fleetos-telemetry/training_data/v2/ (TELEMETRY_BUCKET),
+  │     keeps the newest max_dataset_files batches, requires min_transitions (default 1000),
+  │     writes datasets/<job>/manifest.json to the models bucket
+  │     → too little data stops here (phase "insufficient_data", not a failure)
+  │
   ├─ [use_katib] RunHyperparameterSearch ─► Katib Experiment (namespace fleetos-training)
-  │     TPE, 4 trials × 2 parallel, 20k timesteps each (HPO_* / kubeflow.hpo values)
-  │     search: learning_rate [1e-4, 3e-3], n_steps {512,1024,2048}, ent_coef [0, 0.02]
+  │     TPE, 4 trials × 2 parallel (HPO_* / kubeflow.hpo values); each trial =
+  │     train_offline.py --no-upload on the snapshot (2,000 updates) + 5 test-track episodes
+  │     search: learning_rate [1e-4, 1e-3], cql_alpha [0.1, 5.0], batch_size {128,256,512}
   │     objective: eval_mean_reward (StdOut collector)     → best params
   │
   ├─ SubmitTrainingRun (heartbeats; retries resume the same run)
-  │     backend=argo     ─► Argo WorkflowTemplate fleetos-{locomotion,reach}-training
+  │     train_offline.py — CQL-SAC on the snapshot, raw observations, no simulator
+  │     → evaluate_policy.py on the MuJoCo test track (FleetOS-Humanoid-v2)
+  │     backend=argo     ─► Argo WorkflowTemplate fleetos-offline-training
   │     backend=kubeflow ─► Kubeflow Trainer TrainJobs on ClusterTrainingRuntime fleetos-sb3
   │                         (train TrainJob → evaluate TrainJob)
-  │     Task types: locomotion, reach. Artifacts → S3: training/<job>/policy.zip,
-  │     evaluations/<job>/eval_results.json
+  │     Artifacts → S3: training/<job>/policy.zip, evaluations/<job>/eval_results.json
   │
   ├─ EvaluateTrainedModel — reads this job's eval results; gate (internal/modelgate):
   │     eval pass rate ≥ MODEL_MIN_EVAL_PASS_RATE (0.5) and reward ≤ 5% below deployed model
   │     → rejected models stop here (phase "gated", with the reason)
   │
-  ├─ RegisterTrainedModel → registry (staged) with eval metrics, backend, hyperparameters
+  ├─ RegisterTrainedModel → registry (staged, model cql-fleet, algorithm cql-sac) with eval
+  │     metrics, backend, hyperparameters and data lineage (dataset_manifest, dataset_files)
   │
   └─ Auto-deploy (if enabled)
         └─ Child ModelDeploymentWorkflow on the deployment queue
@@ -289,41 +297,37 @@ Temporal TrainingPipelineWorkflow (fleetos-training queue)
 - **Argo / Kubeflow Trainer** = training compute; **Katib** = hyperparameter search
 - The worker talks to the Argo Server REST API (`internal/argo`) and to the Kubernetes API (`internal/kube`, `internal/kubeflow`) with a namespaced Role, so there's no kubectl in containers
 
-**Not supported yet:** fine-tuning (`base_model`), training from collected experience (`CollectExperienceStats` returns a fixed estimate), Katib for `reach`, GPU training (the AWS GPU design is in Terraform but not verified).
+**Verified on local k3s (CPU, Argo backend):** 300 batches → 29,480 transitions (0 legacy, 5 unlinked dropped), 5,000 CQL updates in 149 s, test-track pass rate 0% → gated. The Katib + Kubeflow variant (`use_katib: true`) was verified on the same snapshot: 4 offline trials → best `batch_size=256, cql_alpha≈3.25, learning_rate≈8.7e-4` → train and eval TrainJobs → gated (pass rate 0%). Those rejections are expected: the fleet's data was idle/falling behaviour from a barely-trained policy.
+
+**Measured trade-off:** offline training is not cheaper per update. On the same 3,200 gradient updates (2–4 CPU pod, simulator running on the same VM), online PPO took 51 s and offline CQL 100 s. The benefits are elsewhere — learning from real robot behaviour (no sim-to-real gap), one dataset reused by every run and Katib trial, and per-model data lineage; the costs move to the data path (larger telemetry, storage) and to heavier updates.
+
+**Not supported yet:** fine-tuning from a base model, `reach` in the pipeline, GPU training (the AWS GPU design is in Terraform but not verified). Offline RL is bounded by the fleet's own behaviour — bootstrap a walking policy with manual online training so fleet data becomes useful. Rewards are computed by the simulator (real robots would need rewards from telemetry). Snapshots list the whole prefix; at fleet scale they need date-range filtering.
 
 ### Training Algorithms
 
-| Task Type | Algorithm | Learning Type | Script | Environment |
-|-----------|-----------|---------------|--------|-------------|
-| `locomotion` | PPO | Reinforcement (on-policy) | `train_locomotion.py` | FleetOS-Humanoid-v2 |
-| `reach` | SAC+HER | Reinforcement (off-policy, semi-supervised) | `train_reach.py` | FleetOS-Reach-v1 |
-| `grasp` | SAC+HER | RL + optional scripted demos | `train_grasp.py` | FleetOS-Grasp-v1 |
-| `offline` | CQL | Offline RL from S3 experience | `train_offline.py` | (eval only) |
-| `bc` | Behavior Cloning | Supervised (expert demos) | `train_bc.py` | (eval only) |
-| `autoencoder` | Autoencoder | Unsupervised (observations) | `train_autoencoder.py` | N/A |
+| Task Type | Algorithm | Learning Type | Script | Environment | Used by |
+|-----------|-----------|---------------|--------|-------------|---------|
+| `locomotion` | CQL-SAC | Offline RL from fleet experience | `train_offline.py` | none (test track for eval) | Pipeline |
+| `locomotion` | PPO | Online RL (on-policy) | `train_locomotion.py` | FleetOS-Humanoid-v2 | Manual / bootstrap |
+| `reach` | SAC+HER | Online RL (off-policy, goal-conditioned) | `train_reach.py` | FleetOS-Reach-v1 | Manual |
+| `grasp` | SAC+HER | RL + optional scripted demos | `train_grasp.py` | FleetOS-Grasp-v1 | Manual |
+| `bc` | Behavior Cloning | Supervised (expert demos) | `train_bc.py` | (eval only) | Manual |
+| `autoencoder` | Autoencoder | Unsupervised (observations) | `train_autoencoder.py` | N/A | Manual |
 
-**Typical workflow for complex tasks (e.g., grasping):**
-1. Collect experience via online RL or scripted demos
-2. Pre-train with behavior cloning: `python train_bc.py --task-type grasp --demo-source experience`
-3. Fine-tune with RL: `python train_grasp.py --base-model training/BC_001/policy.zip`
+### Fleet Experience Data
 
-### Experience Collection
-
-The simulator collects RL experience at runtime and writes to S3:
+Every telemetry packet carries a training context, and the processor writes it as NDJSON:
 
 ```
-Simulator (50 Hz physics loop)
-  → Every 5th step: record (obs, action, reward, done)
-  → obs: 86-dim unified observation (joints, root, hands, grippers, objects, task)
-  → Buffer 500 transitions → flush to S3 as NDJSON
-  → S3 key: experience/{date}/{robot_id}/batch_{timestamp}.ndjson
+Simulator (50 Hz physics, 10 Hz telemetry)
+  → per record: exact 86-dim policy observation, action actually applied, reward,
+    episode_id, step, exploration flag (terminal record on every fall)
+  → EXPLORATION_FRACTION (default 0.2, deterministic per robot) adds N(0, EXPLORATION_STD=0.1) noise
+  → Kafka → Processor (internal/experience), 100 transitions per robot per batch
+  → s3://fleetos-telemetry/training_data/v2/YYYY/MM/DD/HH/<robot_id>/transitions_<ns>.ndjson
 ```
 
-Training jobs consume this experience for:
-- **Online RL** — Pre-warming reward normalization (VecNormalize running stats)
-- **Offline RL (CQL)** — Training directly from S3 data without environment interaction
-- **Behavior Cloning** — Filtering high-reward transitions as expert demonstrations
-- **Autoencoder** — Learning compressed representations from observation vectors
+Records from before format v2 (directly under `training_data/YYYY/…`, no observation) are never used for training. `train_bc.py` and `train_autoencoder.py` still read the old `experience/` prefix, which nothing writes anymore.
 
 ### Custom Training Environments
 
@@ -340,7 +344,7 @@ All share the same 86-dim unified observation format (`observation.py`), same ph
 ### Training Commands
 
 ```bash
-# Locomotion (PPO, from scratch)
+# Locomotion (PPO in MuJoCo, from scratch) — manual bootstrap, not the pipeline
 python train_locomotion.py --job-id job-001 --timesteps 2000000
 
 # Reaching (SAC+HER)
@@ -349,9 +353,9 @@ python train_reach.py --job-id reach-001 --timesteps 500000
 # Grasping (SAC+HER with scripted demonstrations)
 python train_grasp.py --job-id grasp-001 --timesteps 1000000 --generate-demos 1000
 
-# Offline RL (CQL from collected experience)
-python train_offline.py --job-id offline-001 --experience-prefix experience/ \
-  --gradient-steps 100000 --s3-endpoint minio:9000
+# Offline RL (CQL) from a dataset snapshot — normally run by the pipeline
+python train_offline.py --job-id offline-001 \
+  --dataset-manifest datasets/<job>/manifest.json --gradient-steps 20000 --s3-endpoint minio:9000
 
 # Behavior cloning (supervised, from high-reward experience)
 python train_bc.py --job-id bc-001 --task-type locomotion \
@@ -377,8 +381,8 @@ python train_autoencoder.py --job-id ae-001 --experience-prefix experience/ \
 | GPU node group | g5.2xlarge, 0-8, scale-from-zero (designed, not verified) | Training jobs on AWS |
 | Kubeflow namespace | Created by Terraform; Trainer/Katib must be installed separately | ML workloads isolation |
 | IAM role (IRSA) | S3 read/write on models + training-data | Secure artifact access |
-| S3 lifecycle | experience/ → Glacier 30d → delete 180d | Cost management |
-| Katib (Helm `kubeflow.hpo`) | TPE by default, 4 trials × 2 parallel (local budget) | Hyperparameter search |
+| S3 lifecycle | training-data bucket → Glacier 30d → delete 180d (Terraform; fleet experience currently lives in the telemetry bucket under `training_data/v2/`) | Cost management |
+| Katib (Helm `kubeflow.hpo`) | TPE by default, 4 trials × 2 parallel, 2,000 offline updates + 5 test-track episodes per trial (local budget) | Hyperparameter search |
 
 ## Testing
 
@@ -469,7 +473,7 @@ platform/
 |-------|-------------|
 | Backend | Go 1.26, gRPC, Protocol Buffers, net/http |
 | Orchestration | Temporal (durable command workflows, deployment pipelines) |
-| AI/ML | Python, PyTorch, SB3 (PPO, SAC, CQL), FAISS, MuJoCo |
+| AI/ML | Python, PyTorch, SB3 (CQL-SAC offline; PPO/SAC online), FAISS, MuJoCo (simulation + evaluation) |
 | Messaging | Kafka (Confluent), gRPC bidirectional streaming |
 | Storage | PostgreSQL 16, Redis 7, MinIO (S3), ClickHouse |
 | Analytics | Apache Spark (PySpark), ClickHouse (OLAP) |

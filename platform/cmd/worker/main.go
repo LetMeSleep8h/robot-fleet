@@ -139,10 +139,11 @@ func main() {
 	}
 	trainingActs.ModelsBucket = cfg.ModelsBucket
 	trainingActs.HPO = activities.HPOSettings{
-		Algorithm:      cfg.HPOAlgorithm,
-		MaxTrials:      cfg.HPOMaxTrials,
-		ParallelTrials: cfg.HPOParallelTrials,
-		TrialTimesteps: cfg.HPOTrialTimesteps,
+		Algorithm:          cfg.HPOAlgorithm,
+		MaxTrials:          cfg.HPOMaxTrials,
+		ParallelTrials:     cfg.HPOParallelTrials,
+		TrialGradientSteps: cfg.HPOTrialGradientSteps,
+		EvalEpisodes:       cfg.HPOEvalEpisodes,
 	}
 	if cfg.KubeflowEnabled {
 		kubeCfg, err := kube.InClusterConfig()
@@ -150,9 +151,10 @@ func main() {
 			var kc *kube.Client
 			if kc, err = kube.NewClient(kubeCfg); err == nil {
 				trainingActs.Kubeflow = kubeflow.NewRunner(kc, kubeflow.Config{
-					Namespace: cfg.KubeflowNamespace,
-					Runtime:   cfg.KubeflowRuntime,
-					Image:     cfg.TrainingImage,
+					Namespace:      cfg.KubeflowNamespace,
+					Runtime:        cfg.KubeflowRuntime,
+					Image:          cfg.TrainingImage,
+					TrainingSecret: cfg.KubeflowTrainingSecret,
 				})
 				slog.Info("kubeflow enabled", "namespace", cfg.KubeflowNamespace, "runtime", cfg.KubeflowRuntime, "hpo_algorithm", cfg.HPOAlgorithm)
 			}
@@ -169,6 +171,18 @@ func main() {
 		slog.Warn("models bucket unavailable: training evaluation will fail", "error", err)
 	} else {
 		trainingActs.Artifacts = models
+	}
+	// Fleet experience (training_data/ in the telemetry bucket) is the only
+	// training data source; the simulator is used for evaluation only.
+	dataset, err := store.NewS3Store(ctx, store.S3Config{
+		Endpoint: cfg.S3Endpoint, Bucket: cfg.TelemetryBucket,
+		AccessKey: cfg.S3AccessKey, SecretKey: cfg.S3SecretKey, UseSSL: cfg.S3UseSSL,
+	})
+	if err != nil {
+		slog.Warn("telemetry bucket unavailable: dataset snapshots will fail", "error", err)
+	} else {
+		trainingActs.Dataset = dataset
+		trainingActs.DatasetBucket = cfg.TelemetryBucket
 	}
 	trainingWorker := worker.New(tc, temporalpkg.TaskQueueTraining, worker.Options{})
 	trainingWorker.RegisterWorkflow(workflows.TrainingPipelineWorkflow)

@@ -63,13 +63,13 @@ func (f *fakeKubeflow) ExperimentStatus(_ context.Context, _ string) (kubeflow.E
 
 func cmd(spec kubeflow.TrainJobSpec) string { return strings.Join(spec.Command, " ") }
 
-func TestSubmitTrainingRun_KubeflowTrainsThenEvaluates(t *testing.T) {
+func TestSubmitTrainingRun_KubeflowTrainsOfflineThenEvaluates(t *testing.T) {
 	kf := &fakeKubeflow{}
 	acts := &TrainingActivities{Kubeflow: kf, ModelsBucket: "fleetos-models", PollInterval: time.Millisecond}
 	env := newActivityEnv(t, acts)
 
 	val, err := env.ExecuteActivity(acts.SubmitTrainingRun, SubmitTrainingRunInput{
-		JobID: "job-9", TaskType: "locomotion", Timesteps: 20000, EnvID: "FleetOS-Humanoid-v2",
+		JobID: "job-9", DatasetManifest: "datasets/job-9/manifest.json", GradientSteps: 5000,
 		Backend: BackendKubeflow, Hyperparameters: map[string]string{"learning_rate": "0.0012"},
 	})
 	if err != nil {
@@ -82,12 +82,15 @@ func TestSubmitTrainingRun_KubeflowTrainsThenEvaluates(t *testing.T) {
 		t.Fatalf("expected train + eval TrainJobs, got %d", len(kf.trainJobs))
 	}
 	train, eval := kf.trainJobs[0], kf.trainJobs[1]
-	for _, want := range []string{"train_locomotion.py", "--job-id=job-9", "--timesteps=20000", "--env-id=FleetOS-Humanoid-v2", "--learning-rate=0.0012"} {
+	for _, want := range []string{"train_offline.py", "--job-id=job-9", "--dataset-manifest=datasets/job-9/manifest.json", "--gradient-steps=5000", "--learning-rate=0.0012"} {
 		if !strings.Contains(cmd(train), want) {
 			t.Errorf("train command %q missing %q", cmd(train), want)
 		}
 	}
-	for _, want := range []string{"evaluate_policy.py", "--eval-id=job-9", "--model-path=s3://fleetos-models/training/job-9/policy.zip"} {
+	if strings.Contains(cmd(train), "train_locomotion.py") || strings.Contains(cmd(train), "--env-id") {
+		t.Errorf("training must not run the simulator: %q", cmd(train))
+	}
+	for _, want := range []string{"evaluate_policy.py", "--eval-id=job-9", "--model-path=s3://fleetos-models/training/job-9/policy.zip", "--env-id=" + EvalEnvID} {
 		if !strings.Contains(cmd(eval), want) {
 			t.Errorf("eval command %q missing %q", cmd(eval), want)
 		}
@@ -106,7 +109,7 @@ func TestSubmitTrainingRun_KubeflowRetryReusesExistingJobs(t *testing.T) {
 	env := newActivityEnv(t, acts)
 
 	if _, err := env.ExecuteActivity(acts.SubmitTrainingRun, SubmitTrainingRunInput{
-		JobID: "job-9", TaskType: "locomotion", Backend: BackendKubeflow,
+		JobID: "job-9", DatasetManifest: "datasets/job-9/manifest.json", Backend: BackendKubeflow,
 	}); err != nil {
 		t.Fatalf("retried run should resume existing TrainJobs: %v", err)
 	}
@@ -116,15 +119,17 @@ func TestSubmitTrainingRun_KubeflowRetryReusesExistingJobs(t *testing.T) {
 }
 
 func TestSubmitTrainingRun_KubeflowFailures(t *testing.T) {
+	m := "datasets/j/manifest.json"
 	tests := []struct {
 		name  string
 		acts  *TrainingActivities
 		input SubmitTrainingRunInput
 	}{
-		{"not configured", &TrainingActivities{}, SubmitTrainingRunInput{JobID: "j", TaskType: "locomotion", Backend: BackendKubeflow}},
+		{"not configured", &TrainingActivities{}, SubmitTrainingRunInput{JobID: "j", DatasetManifest: m, Backend: BackendKubeflow}},
+		{"no dataset", &TrainingActivities{Kubeflow: &fakeKubeflow{}}, SubmitTrainingRunInput{JobID: "j", Backend: BackendKubeflow}},
 		{"train job fails", &TrainingActivities{Kubeflow: &fakeKubeflow{jobStatus: map[string]kubeflow.JobStatus{"train-j": {Done: true, Message: "OOMKilled"}}}},
-			SubmitTrainingRunInput{JobID: "j", TaskType: "locomotion", Backend: BackendKubeflow}},
-		{"unknown backend", &TrainingActivities{Kubeflow: &fakeKubeflow{}}, SubmitTrainingRunInput{JobID: "j", TaskType: "locomotion", Backend: "sagemaker"}},
+			SubmitTrainingRunInput{JobID: "j", DatasetManifest: m, Backend: BackendKubeflow}},
+		{"unknown backend", &TrainingActivities{Kubeflow: &fakeKubeflow{}}, SubmitTrainingRunInput{JobID: "j", DatasetManifest: m, Backend: "sagemaker"}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -142,7 +147,7 @@ func TestSubmitTrainingRun_KubeflowJobNamesAreDNSSafe(t *testing.T) {
 	env := newActivityEnv(t, acts)
 
 	if _, err := env.ExecuteActivity(acts.SubmitTrainingRun, SubmitTrainingRunInput{
-		JobID: "Train_123.ABC", TaskType: "locomotion", Backend: BackendKubeflow,
+		JobID: "Train_123.ABC", DatasetManifest: "datasets/x/manifest.json", Backend: BackendKubeflow,
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -156,16 +161,16 @@ func TestSubmitTrainingRun_KubeflowJobNamesAreDNSSafe(t *testing.T) {
 func TestRunHyperparameterSearch(t *testing.T) {
 	kf := &fakeKubeflow{expStatus: kubeflow.ExperimentStatus{
 		Done: true, Succeeded: true, BestTrial: "hpo-job-9-x",
-		BestParams: map[string]string{"learning_rate": "0.0012", "n_steps": "1024"}, BestObjective: 17.25,
+		BestParams: map[string]string{"learning_rate": "0.0012", "cql_alpha": "2.5"}, BestObjective: 17.25,
 	}}
 	acts := &TrainingActivities{
 		Kubeflow:     kf,
-		HPO:          HPOSettings{Algorithm: "tpe", MaxTrials: 4, ParallelTrials: 2, TrialTimesteps: 20000},
+		HPO:          HPOSettings{Algorithm: "tpe", MaxTrials: 4, ParallelTrials: 2, TrialGradientSteps: 2000, EvalEpisodes: 5},
 		PollInterval: time.Millisecond,
 	}
 	env := newActivityEnv(t, acts)
 
-	val, err := env.ExecuteActivity(acts.RunHyperparameterSearch, HyperparameterSearchInput{JobID: "job-9", TaskType: "locomotion", EnvID: "FleetOS-Humanoid-v2"})
+	val, err := env.ExecuteActivity(acts.RunHyperparameterSearch, HyperparameterSearchInput{JobID: "job-9", DatasetManifest: "datasets/job-9/manifest.json"})
 	if err != nil {
 		t.Fatalf("RunHyperparameterSearch: %v", err)
 	}
@@ -173,24 +178,26 @@ func TestRunHyperparameterSearch(t *testing.T) {
 	_ = val.Get(&out)
 
 	exp := kf.experiments[0]
-	if exp.Name != "hpo-job-9" || exp.Algorithm != "tpe" || exp.MaxTrials != 4 || exp.ParallelTrials != 2 || exp.TrialTimesteps != 20000 {
+	if exp.Name != "hpo-job-9" || exp.Algorithm != "tpe" || exp.MaxTrials != 4 || exp.ParallelTrials != 2 ||
+		exp.TrialGradientSteps != 2000 || exp.EvalEpisodes != 5 || exp.DatasetManifest != "datasets/job-9/manifest.json" {
 		t.Errorf("unexpected experiment %+v", exp)
 	}
-	if out.Experiment != "hpo-job-9" || out.BestObjective != 17.25 || out.BestParams["learning_rate"] != "0.0012" {
+	if out.Experiment != "hpo-job-9" || out.BestObjective != 17.25 || out.BestParams["cql_alpha"] != "2.5" {
 		t.Errorf("unexpected output %+v", out)
 	}
 }
 
 func TestRunHyperparameterSearch_Failures(t *testing.T) {
+	m := "datasets/j/manifest.json"
 	tests := []struct {
 		name  string
 		kf    *fakeKubeflow
 		input HyperparameterSearchInput
 	}{
-		{"not configured", nil, HyperparameterSearchInput{JobID: "j", TaskType: "locomotion"}},
-		{"task without tunable flags", &fakeKubeflow{}, HyperparameterSearchInput{JobID: "j", TaskType: "reach"}},
-		{"experiment failed", &fakeKubeflow{expStatus: kubeflow.ExperimentStatus{Done: true, Message: "all trials failed"}}, HyperparameterSearchInput{JobID: "j", TaskType: "locomotion"}},
-		{"no best trial", &fakeKubeflow{expStatus: kubeflow.ExperimentStatus{Done: true, Succeeded: true}}, HyperparameterSearchInput{JobID: "j", TaskType: "locomotion"}},
+		{"not configured", nil, HyperparameterSearchInput{JobID: "j", DatasetManifest: m}},
+		{"no dataset", &fakeKubeflow{}, HyperparameterSearchInput{JobID: "j"}},
+		{"experiment failed", &fakeKubeflow{expStatus: kubeflow.ExperimentStatus{Done: true, Message: "all trials failed"}}, HyperparameterSearchInput{JobID: "j", DatasetManifest: m}},
+		{"no best trial", &fakeKubeflow{expStatus: kubeflow.ExperimentStatus{Done: true, Succeeded: true}}, HyperparameterSearchInput{JobID: "j", DatasetManifest: m}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -223,12 +230,12 @@ func TestKubeNames_FitKatibLimitAndStayUnique(t *testing.T) {
 }
 
 func TestRunHyperparameterSearch_LongJobIDFitsKatib(t *testing.T) {
-	kf := &fakeKubeflow{expStatus: kubeflow.ExperimentStatus{Done: true, Succeeded: true, BestParams: map[string]string{"n_steps": "512"}}}
+	kf := &fakeKubeflow{expStatus: kubeflow.ExperimentStatus{Done: true, Succeeded: true, BestParams: map[string]string{"cql_alpha": "1.0"}}}
 	acts := &TrainingActivities{Kubeflow: kf, HPO: DefaultHPOSettings(), PollInterval: time.Millisecond}
 	env := newActivityEnv(t, acts)
 
 	if _, err := env.ExecuteActivity(acts.RunHyperparameterSearch, HyperparameterSearchInput{
-		JobID: "pipe-575af9db-0b1b-4ef0-9f12-889f8ed0d4f5", TaskType: "locomotion",
+		JobID: "pipe-575af9db-0b1b-4ef0-9f12-889f8ed0d4f5", DatasetManifest: "datasets/x/manifest.json",
 	}); err != nil {
 		t.Fatal(err)
 	}

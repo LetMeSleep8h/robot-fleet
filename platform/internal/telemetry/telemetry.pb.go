@@ -636,6 +636,10 @@ type TrainingContext struct {
 	TaskCommand   string                 `protobuf:"bytes,3,opt,name=task_command,json=taskCommand,proto3" json:"task_command,omitempty"`          // current command: "idle", "walk", "reach", "pick_up", etc.
 	EpisodeDone   bool                   `protobuf:"varint,4,opt,name=episode_done,json=episodeDone,proto3" json:"episode_done,omitempty"`         // true if robot fell / episode terminated
 	Objects       []*ObjectState         `protobuf:"bytes,5,rep,name=objects,proto3" json:"objects,omitempty"`                                     // dynamic object positions for manipulation tasks
+	Observation   []float64              `protobuf:"fixed64,6,rep,packed,name=observation,proto3" json:"observation,omitempty"`                    // exact 86-dim policy input at this step (offline training)
+	EpisodeId     string                 `protobuf:"bytes,7,opt,name=episode_id,json=episodeId,proto3" json:"episode_id,omitempty"`                // per-robot episode identifier
+	Step          int64                  `protobuf:"varint,8,opt,name=step,proto3" json:"step,omitempty"`                                          // step index within the episode, starting at 0
+	Exploration   bool                   `protobuf:"varint,9,opt,name=exploration,proto3" json:"exploration,omitempty"`                            // applied action included exploration noise
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -703,6 +707,34 @@ func (x *TrainingContext) GetObjects() []*ObjectState {
 		return x.Objects
 	}
 	return nil
+}
+
+func (x *TrainingContext) GetObservation() []float64 {
+	if x != nil {
+		return x.Observation
+	}
+	return nil
+}
+
+func (x *TrainingContext) GetEpisodeId() string {
+	if x != nil {
+		return x.EpisodeId
+	}
+	return ""
+}
+
+func (x *TrainingContext) GetStep() int64 {
+	if x != nil {
+		return x.Step
+	}
+	return 0
+}
+
+func (x *TrainingContext) GetExploration() bool {
+	if x != nil {
+		return x.Exploration
+	}
+	return false
 }
 
 type ObjectState struct {
@@ -1425,14 +1457,19 @@ const file_proto_telemetry_proto_rawDesc = "" +
 	"\repisode_count\x18\x05 \x01(\x05R\fepisodeCount\x12\x1d\n" +
 	"\n" +
 	"uptime_pct\x18\x06 \x01(\x01R\tuptimePct\x12)\n" +
-	"\x10forward_velocity\x18\a \x01(\x01R\x0fforwardVelocity\"\xd5\x01\n" +
+	"\x10forward_velocity\x18\a \x01(\x01R\x0fforwardVelocity\"\xcc\x02\n" +
 	"\x0fTrainingContext\x12!\n" +
 	"\faction_taken\x18\x01 \x03(\x01R\vactionTaken\x12\x1f\n" +
 	"\vstep_reward\x18\x02 \x01(\x01R\n" +
 	"stepReward\x12!\n" +
 	"\ftask_command\x18\x03 \x01(\tR\vtaskCommand\x12!\n" +
 	"\fepisode_done\x18\x04 \x01(\bR\vepisodeDone\x128\n" +
-	"\aobjects\x18\x05 \x03(\v2\x1e.fleetos.telemetry.ObjectStateR\aobjects\"\x91\x01\n" +
+	"\aobjects\x18\x05 \x03(\v2\x1e.fleetos.telemetry.ObjectStateR\aobjects\x12 \n" +
+	"\vobservation\x18\x06 \x03(\x01R\vobservation\x12\x1d\n" +
+	"\n" +
+	"episode_id\x18\a \x01(\tR\tepisodeId\x12\x12\n" +
+	"\x04step\x18\b \x01(\x03R\x04step\x12 \n" +
+	"\vexploration\x18\t \x01(\bR\vexploration\"\x91\x01\n" +
 	"\vObjectState\x12\x12\n" +
 	"\x04name\x18\x01 \x01(\tR\x04name\x126\n" +
 	"\bposition\x18\x02 \x01(\v2\x1a.fleetos.telemetry.Vector3R\bposition\x126\n" +
