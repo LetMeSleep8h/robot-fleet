@@ -4,6 +4,9 @@ bin/
 /ingestion
 platform/processor
 platform/ingestion
+platform/api
+platform/worker
+platform/fleetos
 coverage.out
 coverage.html
 *.exe
