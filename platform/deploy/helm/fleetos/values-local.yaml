@@ -75,12 +75,20 @@ kafkaStandalone:
 
 minioStandalone:
   enabled: true
-  image: minio/minio:latest
+  image: cgr.dev/chainguard/minio:latest
+  mcImage: cgr.dev/chainguard/minio-client:latest
   rootUser: fleetos
   rootPassword: fleetos123
   buckets: "fleetos-telemetry,fleetos-models,fleetos-training-data"
   serviceType: NodePort
   consoleNodePort: 30901
+
+# --- Training: Argo Workflows runs in the same cluster (namespace argo) ---
+training:
+  argo:
+    serverURL: "https://argo-server.argo.svc.cluster.local:2746"
+    namespace: argo
+    insecureSkipVerify: true  # argo-server uses a self-signed cert locally
 
 temporal:
   enabled: true
@@ -151,6 +159,7 @@ worker:
 
 inference:
   replicaCount: 1
+  platformApiKey: dev-key-002  # viewer dev key — read-only model lookup at startup
   autoscaling:
     enabled: false
   service:

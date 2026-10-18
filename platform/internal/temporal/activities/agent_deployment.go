@@ -124,14 +124,14 @@ type CheckMetricsOutput struct {
 	EstopCount           int     `json:"estop_count"`
 }
 
-// Rollback thresholds from Menlo spec.
+// Rollback thresholds for canary agent deployments.
 const (
 	MaxSafetyViolationRate = 0.001
 	MaxTaskFailureRate     = 0.05
 	MaxEstopCount          = 0
 )
 
-// CheckDeploymentMetrics evaluates canary health using Menlo-style criteria:
+// CheckDeploymentMetrics evaluates canary health using these criteria:
 // safety_violation_rate, task_failure_rate, and estop_count.
 func (a *AgentDeploymentActivities) CheckDeploymentMetrics(ctx context.Context, input CheckMetricsInput) (*CheckMetricsOutput, error) {
 	// In production: query ClickHouse/Prometheus for real metrics from the canary fleet.

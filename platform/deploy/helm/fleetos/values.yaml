@@ -97,6 +97,8 @@ worker:
 # --- Inference Service ---
 inference:
   replicaCount: 1
+  # API key (viewer role is enough) for the startup lookup of the deployed model.
+  platformApiKey: ""
   image:
     repository: fleetos/inference
     tag: latest
@@ -220,6 +222,36 @@ minio:
   persistence:
     size: 100Gi
 
+# --- MinIO (standalone template, used when the Bitnami subchart is off) ---
+# minio/minio and minio/mc are no longer published on Docker Hub; Chainguard's
+# builds keep the upstream entrypoints.
+minioStandalone:
+  enabled: false
+  image: cgr.dev/chainguard/minio:latest
+  mcImage: cgr.dev/chainguard/minio-client:latest
+  rootUser: fleetos
+  rootPassword: fleetos123
+  buckets: "fleetos-telemetry,fleetos-models,fleetos-training-data"
+  serviceType: ClusterIP
+  persistence:
+    enabled: false
+    size: 5Gi
+    storageClass: ""
+
+# --- Training (Argo Workflows) ---
+# The api and worker submit WorkflowTemplates through the Argo Server REST API.
+# Empty serverURL = training disabled (API returns 503, pipeline fails fast).
+training:
+  argo:
+    serverURL: ""
+    namespace: argo
+    insecureSkipVerify: false
+    # Name of a Secret with key `token` holding an Argo bearer token (optional).
+    tokenSecret: ""
+  modelsBucket: fleetos-models
+  # Minimum evaluation pass rate (0–1) a model needs before it can be deployed.
+  minEvalPassRate: "0.5"
+
 # --- Observability ---
 prometheus:
   enabled: true
@@ -244,44 +276,26 @@ istio:
     canary:
       weight: 0
 
-# --- Kubeflow (MLOps) ---
+# --- Kubeflow (Trainer TrainJobs + Katib HPO) ---
+# Optional training backend for the Temporal pipeline (backend: kubeflow,
+# use_katib: true). Requires Kubeflow Trainer v2 and Katib in the cluster.
 kubeflow:
-  enabled: true
-  namespace: kubeflow
-  training:
-    image:
-      repository: fleetos/training
-      tag: latest
-    defaultTimesteps: 2000000
-    defaultEnv: "FleetOS-Humanoid-v1"
-    resources:
-      requests:
-        cpu: "2"
-        memory: 4Gi
-        nvidia.com/gpu: "1"
-      limits:
-        cpu: "4"
-        memory: 8Gi
-        nvidia.com/gpu: "1"
-    tolerations:
-      - key: nvidia.com/gpu
-        operator: Exists
-        effect: NoSchedule
-    nodeSelector:
-      workload: training
-    s3:
-      bucket: fleetos-models
-      experiencePrefix: experience/
-  katib:
-    enabled: true
-    maxTrials: 20
-    parallelTrials: 3
-    parameters:
-      learningRate:
-        min: "0.0001"
-        max: "0.001"
-      batchSize:
-        values: ["32", "64", "128"]
-      nEpochs:
-        min: "5"
-        max: "15"
+  enabled: false
+  namespace: fleetos-training
+  runtime: fleetos-sb3
+  image:
+    repository: fleetos/training
+    tag: latest
+  imagePullPolicy: IfNotPresent
+  resources:
+    requests:
+      cpu: "2"
+      memory: 3Gi
+    limits:
+      cpu: "4"
+      memory: 6Gi
+  hpo:
+    algorithm: tpe        # Katib algorithm: tpe | random | bayesianoptimization | ...
+    maxTrials: 4
+    parallelTrials: 2
+    trialTimesteps: 20000 # short runs: trials only need a comparable metric

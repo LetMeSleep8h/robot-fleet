@@ -12,6 +12,7 @@ Instruction keywords bias the raw policy output for command-specific motion.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import math
@@ -21,6 +22,7 @@ import threading
 import time
 import urllib.request
 import urllib.error
+from collections import OrderedDict
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
 
@@ -46,17 +48,18 @@ HUMANOID_JOINTS = [
     "right_ankle_pitch", "right_ankle_roll",
     "right_gripper_left", "right_gripper_right",
     "left_gripper_left", "left_gripper_right",
+    "torso_roll",
 ]
 
 # MuJoCo humanoid has 25 actuators (17 body + 4 ankle + 4 gripper)
 MUJOCO_ACTION_DIM = 25
-FLEET_ACTION_DIM = len(HUMANOID_JOINTS)  # 24
+FLEET_ACTION_DIM = len(HUMANOID_JOINTS)  # 25 — one fleet joint per actuator
 
 # Maps MuJoCo actuator index → HUMANOID_JOINTS index
 MUJOCO_TO_FLEET = {
     0: 0,    # abdomen_y → head_pan
     1: 1,    # abdomen_z → head_tilt
-    # 2: abdomen_x → no mapping
+    2: 24,   # abdomen_x → torso_roll
     3: 15,   # right_hip_x → right_hip_roll
     4: 14,   # right_hip_z → right_hip_yaw
     5: 16,   # right_hip_y → right_hip_pitch
@@ -295,8 +298,14 @@ def _poll_platform_model(platform_api_url: str) -> str:
     Returns the artifact_url of the deployed model, or empty string.
     """
     url = f"{platform_api_url.rstrip('/')}/api/v1/models?status=deployed"
+    req = urllib.request.Request(url)
+    # The models API is authenticated; without a key this 401s and inference
+    # silently restarts on the zero-action stub instead of the deployed model.
+    api_key = os.environ.get("PLATFORM_API_KEY", "")
+    if api_key:
+        req.add_header("X-API-Key", api_key)
     try:
-        with urllib.request.urlopen(url, timeout=5) as resp:
+        with urllib.request.urlopen(req, timeout=5) as resp:
             data = json.loads(resp.read())
         models = data.get("models") or []
         if models:
@@ -322,8 +331,7 @@ def _hot_swap_model(artifact_url: str) -> None:
             os.remove(zip_path)
 
         if _download_model_from_s3(artifact_url):
-            from stable_baselines3 import PPO
-            new_model = PPO.load(str(MODEL_PATH))
+            new_model = load_policy_file(str(MODEL_PATH))
             with _policy_lock:
                 _policy = new_model
             log.info("[Model] Hot-swapped to new model from %s", artifact_url)
@@ -383,14 +391,15 @@ def _parse_s3_key(artifact_url: str) -> str:
     return artifact_url
 
 
-def _download_model_from_s3(artifact_url: str = "") -> bool:
+def _download_model_from_s3(artifact_url: str = "", zip_path: str | None = None) -> bool:
     """Download the model from S3/MinIO.
 
     Args:
         artifact_url: S3 key or s3:// URL from the model registry.
                       Falls back to S3_MODEL_PREFIX if empty.
+        zip_path: Destination file. Defaults to the active model's MODEL_PATH.zip.
     """
-    zip_path = str(MODEL_PATH) + ".zip"
+    zip_path = zip_path or str(MODEL_PATH) + ".zip"
     try:
         from minio import Minio
         client = Minio(S3_ENDPOINT, access_key=S3_ACCESS_KEY, secret_key=S3_SECRET_KEY, secure=False)
@@ -400,7 +409,7 @@ def _download_model_from_s3(artifact_url: str = "") -> bool:
         else:
             s3_key = S3_MODEL_PREFIX + "/policy.zip"
 
-        MODEL_DIR.mkdir(parents=True, exist_ok=True)
+        Path(zip_path).parent.mkdir(parents=True, exist_ok=True)
         client.fget_object(S3_BUCKET, s3_key, zip_path)
         log.info("[Model] Downloaded from s3://%s/%s", S3_BUCKET, s3_key)
         return True
@@ -424,26 +433,105 @@ class _StubPolicy:
         return np.zeros(MUJOCO_ACTION_DIM, dtype=np.float32), None
 
 
+def load_policy_file(path: str):
+    """Load an SB3 policy saved at `path` (with or without .zip).
+
+    Locomotion policies are PPO; reach/grasp policies are SAC (+HER). The zip
+    doesn't say which, so try PPO first and fall back to SAC.
+    """
+    from stable_baselines3 import PPO, SAC
+
+    try:
+        return PPO.load(path)
+    except Exception as ppo_err:
+        try:
+            # SAC+HER policies refuse to load without an env (HerReplayBuffer
+            # needs one). Serving never touches the replay buffer, so swap in
+            # the plain dict buffer.
+            from stable_baselines3.common.buffers import DictReplayBuffer
+            model = SAC.load(path, custom_objects={
+                "replay_buffer_class": DictReplayBuffer,
+                "replay_buffer_kwargs": {},
+            })
+            log.info("[Model] Loaded %s as SAC", path)
+            return model
+        except Exception as sac_err:
+            raise RuntimeError(f"load policy {path}: not PPO ({ppo_err}) or SAC ({sac_err})") from sac_err
+
+
+class PolicyCache:
+    """Thread-safe LRU of loaded policies keyed by artifact_url.
+
+    Lets canary robots run a different model than the fleet default: the API
+    passes the robot's assigned artifact_url and we serve that policy. Each
+    entry carries its own lock because SB3 predict() isn't safe to call
+    concurrently on one model.
+    """
+
+    def __init__(self, capacity: int, fetch):
+        self._capacity = max(1, capacity)
+        self._fetch = fetch  # artifact_url -> policy (raises on failure)
+        self._entries: "OrderedDict[str, tuple[object, threading.Lock]]" = OrderedDict()
+        self._lock = threading.Lock()
+
+    def get(self, artifact_url: str) -> tuple[object, threading.Lock]:
+        with self._lock:
+            entry = self._entries.get(artifact_url)
+            if entry is not None:
+                self._entries.move_to_end(artifact_url)
+                return entry
+
+        # Load outside the cache lock so a slow S3 download doesn't block hits.
+        policy = self._fetch(artifact_url)
+        entry = (policy, threading.Lock())
+        with self._lock:
+            self._entries[artifact_url] = entry
+            self._entries.move_to_end(artifact_url)
+            while len(self._entries) > self._capacity:
+                evicted, _ = self._entries.popitem(last=False)
+                log.info("[Model] Evicted cached policy %s", evicted)
+        return entry
+
+    def keys(self) -> list[str]:
+        with self._lock:
+            return list(self._entries)
+
+
+def _artifact_cache_path(artifact_url: str) -> str:
+    """Per-artifact download path (never MODEL_PATH, which hot-swap deletes)."""
+    digest = hashlib.sha1(artifact_url.encode()).hexdigest()[:16]
+    return str(MODEL_DIR / "cache" / digest / "policy")
+
+
+def _fetch_policy(artifact_url: str):
+    path = _artifact_cache_path(artifact_url)
+    if not os.path.exists(path + ".zip") and not _download_model_from_s3(artifact_url, path + ".zip"):
+        raise RuntimeError(f"download {artifact_url} failed")
+    return load_policy_file(path)
+
+
+POLICY_CACHE_SIZE = int(os.environ.get("INFERENCE_POLICY_CACHE_SIZE", "4"))
+_policy_cache = PolicyCache(POLICY_CACHE_SIZE, _fetch_policy)
+
+
 def load_model(artifact_url: str = ""):
-    """Load a pre-trained PPO model from cache or S3.
+    """Load a pre-trained policy (PPO or SAC) from cache or S3.
 
     Training is handled by platform/training/ — this service only serves inference.
     """
-    from stable_baselines3 import PPO
-
     zip_path = str(MODEL_PATH) + ".zip"
 
     # Try local cache first
     if os.path.exists(zip_path):
         log.info("[Model] Loading cached model from %s", zip_path)
-        model = PPO.load(str(MODEL_PATH))
+        model = load_policy_file(str(MODEL_PATH))
         log.info("[Model] Model loaded successfully")
         return model
 
     # Try downloading from S3
     if _download_model_from_s3(artifact_url) and os.path.exists(zip_path):
         log.info("[Model] Loading downloaded model from %s", zip_path)
-        model = PPO.load(str(MODEL_PATH))
+        model = load_policy_file(str(MODEL_PATH))
         log.info("[Model] Model loaded successfully")
         return model
 
@@ -471,7 +559,7 @@ def get_default_observation() -> np.ndarray:
 # ─── Inference Pipeline ──────────────────────────────────────────
 
 def mujoco_to_fleet_actions(mujoco_actions: np.ndarray) -> list[dict]:
-    """Convert 17-dim MuJoCo actions to 20-joint fleet schema."""
+    """Convert 25-dim MuJoCo actions to the 25-joint fleet schema (one joint per actuator)."""
     fleet_torques = np.zeros(FLEET_ACTION_DIM, dtype=np.float32)
     for mj_idx, fleet_idx in MUJOCO_TO_FLEET.items():
         fleet_torques[fleet_idx] = np.clip(mujoco_actions[mj_idx], -1.0, 1.0)
@@ -545,22 +633,66 @@ def apply_instruction_bias(actions: np.ndarray, instruction: str) -> np.ndarray:
     return np.clip(out, -1.0, 1.0)
 
 
-def run_inference(observation: list | None, instruction: str, model_id: str, embodiment: str) -> dict:
+# Right-hand position inside the unified 86-dim observation:
+# joint_pos(25) + joint_vel(25) + root_quat(4) + root_linvel(3) + root_angvel(3) = 60.
+HAND_RIGHT_SLICE = slice(60, 63)
+
+
+def build_policy_obs(policy, obs: np.ndarray, goal: list | None):
+    """Shape the observation for the policy.
+
+    Goal-conditioned policies (SAC+HER reach/grasp) expect a dict of
+    observation / achieved_goal / desired_goal; everything else takes the flat
+    86-dim vector. achieved_goal is the right-hand position (what the reach env
+    uses); desired_goal comes from the request, or the hand itself if absent.
     """
-    Run the real PPO policy on the given observation.
+    spaces = getattr(getattr(policy, "observation_space", None), "spaces", None)
+    if not spaces or "desired_goal" not in spaces:
+        return obs
+    achieved = obs[HAND_RIGHT_SLICE].astype(np.float32)
+    desired = np.asarray(goal, dtype=np.float32)[:3] if goal else achieved.copy()
+    return {"observation": obs, "achieved_goal": achieved, "desired_goal": desired}
+
+
+def select_policy(artifact_url: str = "", model_id: str = "", model_version: str = ""):
+    """Pick the policy for a request.
+
+    No artifact_url (or the active model's own artifact) → the active global
+    policy. Otherwise the artifact's policy from the LRU cache — this is how a
+    canary robot gets its assigned model. If that policy can't be loaded we
+    serve the active policy instead and flag the response as a fallback.
+
+    Returns (policy, lock, model_id, model_version, fallback).
+    """
+    active_id, active_version = _active_model.snapshot()
+    if artifact_url and artifact_url != _active_model.artifact_url:
+        try:
+            policy, lock = _policy_cache.get(artifact_url)
+            return policy, lock, model_id or artifact_url, model_version, False
+        except Exception as exc:
+            log.warning("[Model] Could not load %s (%s) — falling back to active model %s",
+                        artifact_url, exc, active_id)
+            return _policy, _policy_lock, active_id, active_version, True
+    return _policy, _policy_lock, active_id, active_version, False
+
+
+def run_inference(observation: list | None, instruction: str, model_id: str, embodiment: str,
+                  artifact_url: str = "", model_version: str = "", goal: list | None = None) -> dict:
+    """
+    Run the trained policy on the given observation.
 
     Args:
-        observation: Optional 376-dim MuJoCo observation. Uses default if None.
+        observation: Optional 86-dim (or legacy 376-dim) observation. Uses default if None.
         instruction: Natural language command to bias the action output.
-        model_id: Model identifier (for logging/tracking).
+        model_id: Registry model ID requested by the caller (e.g. a canary assignment).
         embodiment: Robot embodiment type.
+        artifact_url: S3 artifact of the requested model; empty = active model.
+        model_version: Registry version of the requested model.
     """
     pipeline_start = time.perf_counter()
 
-    active_id, active_version = _active_model.snapshot()
-    if not model_id:
-        model_id = active_id
-    model_version = active_version
+    policy, policy_lock, model_id, model_version, fallback = select_policy(
+        artifact_url, model_id, model_version)
 
     log.info("=" * 60)
     log.info("INFERENCE REQUEST")
@@ -579,8 +711,20 @@ def run_inference(observation: list | None, instruction: str, model_id: str, emb
         obs = get_default_observation()
 
     # Run policy
-    with _policy_lock:
-        raw_action, _states = _policy.predict(obs, deterministic=False)
+    try:
+        with policy_lock:
+            raw_action, _states = policy.predict(build_policy_obs(policy, obs, goal), deterministic=False)
+    except Exception as exc:
+        if policy is _policy:
+            raise
+        # A canary policy that can't handle this request must not take the
+        # robot down — serve the active model instead.
+        log.warning("[Model] Policy %s failed to predict (%s) — falling back to active model",
+                    model_id, exc)
+        model_id, model_version = _active_model.snapshot()
+        fallback = True
+        with _policy_lock:
+            raw_action, _states = _policy.predict(build_policy_obs(_policy, obs, goal), deterministic=False)
 
     raw_action = np.asarray(raw_action, dtype=np.float32)
     log.info("  [Policy] Raw action (17-dim): mean=%.3f, std=%.3f, range=[%.3f, %.3f]",
@@ -610,6 +754,7 @@ def run_inference(observation: list | None, instruction: str, model_id: str, emb
         "task_type": instruction,
         "action_dim": MUJOCO_ACTION_DIM,
         "latency_ms": round(total_ms, 1),
+        "fallback": fallback,
     }
 
 
@@ -633,6 +778,9 @@ class InferenceHandler(BaseHTTPRequestHandler):
                 instruction=body.get("instruction", "stand still"),
                 model_id=body.get("model_id", ""),
                 embodiment=body.get("embodiment", "humanoid-v4"),
+                artifact_url=body.get("artifact_url", ""),
+                model_version=body.get("model_version", ""),
+                goal=body.get("goal"),
             )
 
             self.send_response(200)

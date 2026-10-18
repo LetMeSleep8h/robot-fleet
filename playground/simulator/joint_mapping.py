@@ -8,7 +8,7 @@ MuJoCo humanoid has 25 actuated joints:
   - 6 arm (shoulder1, shoulder2, elbow) × 2
   - 4 gripper (gripper_l, gripper_r) × 2
 
-Our fleet schema has 28 joints (25 actuated + abdomen_x unmapped + 3 mapped differently).
+Our fleet schema has 25 joints — one per actuator (abdomen_x maps to torso_roll).
 """
 
 # MuJoCo actuator index -> our joint name
@@ -16,7 +16,7 @@ Our fleet schema has 28 joints (25 actuated + abdomen_x unmapped + 3 mapped diff
 MUJOCO_ACTUATOR_TO_FLEET = {
     0: "head_pan",               # abdomen_y
     1: "head_tilt",              # abdomen_z
-    2: None,                     # abdomen_x (no mapping)
+    2: "torso_roll",             # abdomen_x
     3: "right_hip_roll",         # right_hip_x
     4: "right_hip_yaw",          # right_hip_z
     5: "right_hip_pitch",        # right_hip_y
@@ -58,7 +58,7 @@ MUJOCO_QPOS_OFFSET = 7
 # qvel[6:31] = 25 joint velocities
 MUJOCO_QVEL_OFFSET = 6
 
-# Full fleet joint schema (28 joints: 24 mapped + 4 gripper)
+# Full fleet joint schema (25 joints, one per MuJoCo actuator)
 FLEET_JOINT_NAMES = [
     "head_pan", "head_tilt",
     "left_shoulder_pitch", "left_shoulder_roll", "left_elbow",
@@ -69,6 +69,7 @@ FLEET_JOINT_NAMES = [
     "right_ankle_pitch", "right_ankle_roll",
     "right_gripper_left", "right_gripper_right",
     "left_gripper_left", "left_gripper_right",
+    "torso_roll",
 ]
 
 # No unmapped joints — all fleet joints now have MuJoCo actuators

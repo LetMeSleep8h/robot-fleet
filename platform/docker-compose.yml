@@ -100,7 +100,9 @@ services:
 
   # --- MinIO (S3-compatible object storage) ---
   minio:
-    image: minio/minio:latest
+    # minio/minio is no longer published on Docker Hub; Chainguard's build keeps
+    # the upstream entrypoint and ships `mc` for the healthcheck.
+    image: cgr.dev/chainguard/minio:latest
     ports:
       - "9000:9000"
       - "9001:9001"
@@ -118,17 +120,15 @@ services:
       - minio_data:/data
 
   minio-init:
-    image: minio/mc:latest
+    # Distroless mc image (no shell): alias via MC_HOST_<alias>, idempotent mb.
+    image: cgr.dev/chainguard/minio-client:latest
     depends_on:
       minio:
         condition: service_healthy
-    entrypoint: >
-      /bin/sh -c "
-      mc alias set fleetos http://minio:9000 fleetos fleetos123 &&
-      mc mb --ignore-existing fleetos/fleetos-models &&
-      mc mb --ignore-existing fleetos/fleetos-telemetry
-      "
-    restart: "no"
+    environment:
+      MC_HOST_fleetos: http://fleetos:fleetos123@minio:9000
+    command: ["mb", "--ignore-existing", "fleetos/fleetos-models", "fleetos/fleetos-telemetry", "fleetos/fleetos-training-data"]
+    restart: on-failure
 
   # --- Temporal (Control Plane) ---
   temporal:
@@ -287,6 +287,7 @@ services:
     environment:
       INFERENCE_PORT: "8081"
       PLATFORM_API_URL: "http://api:8080"
+      PLATFORM_API_KEY: "dev-key-002"  # viewer key for the startup deployed-model lookup
       S3_ENDPOINT: "minio:9000"
       S3_BUCKET: "fleetos-models"
       S3_ACCESS_KEY: "fleetos"

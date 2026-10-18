@@ -7,20 +7,21 @@ A distributed robot fleet management platform that connects simulated humanoid r
 ```
 robot-fleet/
 ├── platform/               # Cloud brain (Go backend, infra, SDKs)
-│   ├── cmd/                # Service entry points (api, ingestion, processor, worker)
+│   ├── cmd/                # Entry points (api, ingestion, processor, worker, fleetos CLI)
 │   ├── internal/           # Core Go packages (api, service, store, auth, billing, temporal)
+│   ├── inference/          # SB3 PPO inference server + FAISS command resolution (Python)
 │   ├── admin-web/          # React admin console (tenant & API key management)
 │   ├── deploy/             # Docker, Helm, Terraform configs
 │   ├── analytics/          # Spark + ClickHouse analytics pipeline
-│   ├── migrations/         # PostgreSQL DDL migrations (001-008)
+│   ├── migrations/         # PostgreSQL DDL migrations (001-010)
 │   ├── observability/      # Prometheus, Grafana, alerting
 │   ├── sdk/                # Python + TypeScript SDKs
 │   ├── training/           # ML training pipeline (PPO, SAC+HER, CQL, BC, autoencoder)
 │   └── docker-compose.yml  # Full platform stack (17 services)
 └── playground/             # Robot simulator (MuJoCo + React 3D)
     ├── simulator/          # MuJoCo Humanoid-v4 physics + gRPC telemetry
-    ├── inference/          # SB3 PPO inference server (Python)
     ├── web/                # React + Three.js 3D dashboard
+    ├── ros2_bridge/        # ROS 2 topic bridge
     ├── proto/              # Protobuf definitions (simulator copy)
     └── docker-compose.yml  # Playground stack (3 services)
 ```
@@ -31,12 +32,12 @@ robot-fleet/
 - **Developer API Platform** — REST, WebSocket, and gRPC APIs with OpenAPI 3.1 spec, TypeScript + Python SDKs
 - **Admin Console** — React SPA at `/admin/` for tenant management, API key lifecycle (create/revoke), and billing overview
 - **Multi-tenant Auth & Billing** — JWT + OAuth2/OIDC + DB-backed API key auth, RBAC (4 roles), per-tenant rate limiting, usage metering, Temporal-based billing workflows with dunning
-- **AI Inference** — SB3 PPO policy serving with hot model swap, per-robot model assignment, performance metrics feedback loop
-- **ML Training Pipeline** — Temporal orchestrates the full lifecycle: collect experience → submit Kubeflow training (GPU + Katib HPO) → evaluate → register → canary deploy. Supports 6 task types: locomotion (PPO), reaching (SAC+HER), grasping (SAC+HER + demos), offline RL (CQL), behavior cloning (supervised), and autoencoder (unsupervised)
+- **AI Inference** — SB3 PPO/SAC policy serving with hot model swap and per-request model routing (each robot's assigned model artifact, LRU policy cache), so canary robots are really served by the canary policy
+- **ML Training Pipeline** — Temporal orchestrates the lifecycle: [Katib HPO] → train + evaluate (Argo Workflows or Kubeflow Trainer) → evaluation gate → register → canary deploy. Started via `POST /api/v1/training/pipelines`. Pipeline tasks: locomotion (PPO) and reaching (SAC+HER); the other training scripts (grasping, CQL, BC, autoencoder) run standalone
 - **Multi-Algorithm Training** — PPO for locomotion, SAC+HER for goal-conditioned tasks (reaching, grasping), CQL for offline RL from collected experience, behavior cloning for supervised pre-training, autoencoder for unsupervised representation learning
 - **Experience Collection** — Simulator records (obs, action, reward, done) transitions at 10 Hz → S3 NDJSON batches for offline RL and behavior cloning. 86-dim unified observations across all tasks
-- **Kubeflow Integration** — Dedicated GPU node group (g5.2xlarge, scale-from-zero), Katib for Bayesian HPO (20 trials, 3 parallel), PyTorchJob for distributed training, IRSA for S3 access
-- **Canary Model Deployment** — Progressive rollout (5% → 25% → 50% → 100%) via Temporal workflows with deterministic robot selection, live success_rate comparison, and automatic rollback
+- **Kubeflow Integration** — Kubeflow Trainer v2 `TrainJob`s on a FleetOS `ClusterTrainingRuntime`, and Katib (TPE by default) hyperparameter search over learning rate / n_steps / entropy coefficient; the best trial's parameters train the final model. Verified on local k3s (CPU). The AWS design (GPU node group, IRSA) is in Terraform but not verified, and Terraform does not install Trainer/Katib
+- **Evaluation Gate + Canary Deployment** — Models must pass the eval gate (pass rate ≥ 0.5, reward ≤ 5% below the deployed model) to be registered or deployed; deploys roll out progressively (assign 5% → observe → 25% → 50% → 100%) via Temporal with deterministic robot selection, live success_rate comparison, and automatic rollback
 - **Performance Metrics** — Reward computation (forward velocity + alive bonus - control cost), uptime tracking, fall detection — fed back to model registry for canary evaluation
 - **Durable Command Pipeline** — Commands flow through Kafka into Temporal workflows with full audit trail, ack tracking via Kafka topics, and automatic retries
 - **Semantic Commands** — Natural language robot control via extensible command registry (strategy pattern)
@@ -74,15 +75,16 @@ robot-fleet/
 │  Worker (Temporal — 5 task queues)                │
 │    ├─ CommandDispatchWorkflow                    │
 │    ├─ ModelDeploymentWorkflow (canary rollout)   │
-│    ├─ TrainingPipelineWorkflow → Kubeflow        │
+│    ├─ TrainingPipelineWorkflow → Argo / Kubeflow │
 │    ├─ BillingCycleWorkflow (monthly invoicing)   │
 │    └─ WebhookFanoutWorkflow                      │
 │  Processor → Postgres/Redis/S3/ClickHouse        │
 │    └─ Performance metrics → model registry       │
-│  Kubeflow (ML compute — separate namespace)      │
-│    ├─ PyTorchJob on GPU nodes (g5.2xlarge)       │
-│    ├─ Katib HPO (Bayesian, 20 trials)            │
-│    └─ S3 artifacts (models + experience)         │
+│  Training compute                                │
+│    ├─ Argo Workflows (train → evaluate)          │
+│    ├─ Kubeflow Trainer TrainJobs (fleetos-sb3)   │
+│    ├─ Katib HPO (TPE, 4 trials × 2 parallel)     │
+│    └─ S3 artifacts (models + eval results)       │
 └──────────────────────────────────────────────────┘
 ```
 
@@ -150,6 +152,24 @@ make k8s-argocd-password     # Get ArgoCD admin password
 make k8s-down                # Delete cluster
 ```
 
+### Option C: k3s on Colima (lightweight, MLOps-focused)
+
+Single-node k3s inside Colima (macOS). Runs the platform plus Argo Workflows, Kubeflow Trainer v2.3.0 and Katib v0.19.0. ArgoCD, the simulator and dashboards are off to save memory. Needs ~15 GB free disk.
+
+```bash
+cd platform
+make k3s-up        # colima start --kubernetes, build images, install Argo + Kubeflow + Katib, helm install
+make k3s-images    # rebuild images + restart pods
+make k3s-train TASK=locomotion TIMESTEPS=20000   # one-off Argo training workflow
+make k3s-down      # colima stop (MinIO data on its PVC survives)
+
+# Full pipeline: Katib HPO → Kubeflow TrainJob → evaluate → gate (→ register → canary)
+curl -X POST -H 'X-API-Key: dev-key-001' http://<colima-vm-ip>:30880/api/v1/training/pipelines \
+  -d '{"task_type":"locomotion","timesteps":20000,"use_katib":true}'
+```
+
+Dashboards are on the Colima VM IP (`colima list`): API `:30880`, Argo UI `https://…:30746`, MinIO console `:30901`. For the Katib UI, run `kubectl -n kubeflow port-forward svc/katib-ui 8090:80` and open http://localhost:8090/katib/.
+
 ### Access Points
 
 | Service | Docker Compose | Kubernetes (NodePort) |
@@ -199,9 +219,22 @@ curl -X POST -H "X-API-Key: dev-key-001" -H "Content-Type: application/json" \
 | `POST` | `/api/v1/robots/{id}/command` | Send command → Kafka → Temporal |
 | `GET` | `/api/v1/robots/{id}/commands` | Command history with audit trail |
 | `POST` | `/api/v1/inference` | AI inference (uses robot's assigned model) |
+| `GET` | `/api/v1/robots/{id}/telemetry` | Recent telemetry |
 | `GET` | `/api/v1/fleet/metrics` | Aggregated fleet stats |
+| `GET` | `/api/v1/usage` | Tenant usage |
 | `POST` | `/api/v1/models` | Register model (staged) |
-| `POST` | `/api/v1/models/{id}/deploy` | Deploy model (canary rollout) |
+| `POST` | `/api/v1/models/{id}/deploy` | Gate + start canary rollout → `202 {workflow_id}`; `422` gate rejection (with reason), `409` not staged, `503` without Temporal |
+| `POST` | `/api/v1/models/{id}/archive` | Archive model |
+| `POST` | `/api/v1/agents` | Register agent; `/{id}/deploy`, `/{id}/rollback`, `/{id}/deployments` |
+| `GET` | `/api/v1/deployments/{id}/stream` | Stream deployment progress |
+| `POST` | `/api/v1/training/pipelines` | Start training pipeline `{task_type, timesteps, backend: argo\|kubeflow, use_katib, auto_deploy}` → `202 {workflow_id, job_id}` |
+| `GET` | `/api/v1/training/pipelines/{id}` | Pipeline status (`running`/`completed`/`failed`) + result |
+| `POST` | `/api/v1/locomotion/jobs` | Submit a single Argo training job (also `GET` list/detail); `503` if training not configured |
+| `POST` | `/api/v1/locomotion/evals` | Submit evaluation (also `GET` list/detail) |
+| `GET` | `/api/v1/skills` | Skills catalog |
+| `POST` | `/api/v1/safety/incidents` | Report safety incident (also `GET` list) |
+| `POST` | `/api/v1/webhooks` | Register webhook (also `GET`, `DELETE`) |
+| `GET` | `/api/v1/analytics/fleet` | ClickHouse fleet analytics (also `/robots/{id}`, `/anomalies`; when enabled) |
 | `GET` | `/api/v1/billing/invoices` | Billing invoices |
 | `PUT` | `/api/v1/billing/subscription/tier` | Change pricing tier |
 | `POST` | `/api/v1/admin/tenants` | Create tenant + API key (admin) |
@@ -247,25 +280,30 @@ Tenant created → Temporal BillingCycleWorkflow (monthly, continue-as-new)
   → Signals: change-tier, cancel-subscription, retry-payment
 ```
 
-### ML Training Pipeline (Temporal + Kubeflow)
+### ML Training Pipeline (Temporal + Argo / Kubeflow)
 ```
-Temporal TrainingPipelineWorkflow
-  ├─ CollectExperienceStats — check S3 for robot experience data
-  ├─ SubmitKubeflowRun — PyTorchJob (or Katib HPO) on GPU nodes
-  │     Task types: locomotion, reach, grasp, offline, bc, autoencoder
-  │     Optional: --base-model (fine-tune) + --from-experience (S3 data)
-  ├─ EvaluateTrainedModel — compare vs baseline (gate: ≥95% of baseline)
-  ├─ RegisterTrainedModel — model registry (staged)
-  └─ Auto-deploy → child ModelDeploymentWorkflow (canary rollout)
+POST /api/v1/training/pipelines → Temporal TrainingPipelineWorkflow (queue fleetos-training)
+  ├─ [use_katib] RunHyperparameterSearch — Katib Experiment (TPE, 4 trials × 2 parallel,
+  │     20k timesteps each) over learning_rate / n_steps / ent_coef, maximizing eval_mean_reward
+  ├─ SubmitTrainingRun — train, then evaluate (uploads training/<job>/policy.zip and
+  │     evaluations/<job>/eval_results.json):
+  │       backend=argo      → Argo WorkflowTemplate fleetos-{locomotion,reach}-training
+  │       backend=kubeflow  → Kubeflow Trainer TrainJobs on runtime fleetos-sb3
+  │                           (Katib's best params passed to the final run)
+  │     Task types: locomotion, reach (fine-tune / experience runs are rejected for now)
+  ├─ EvaluateTrainedModel — gate: eval pass rate ≥ 0.5 and reward ≤ 5% below deployed model
+  ├─ RegisterTrainedModel — registry (staged) with eval metrics, backend, hyperparameters
+  └─ [auto_deploy] child ModelDeploymentWorkflow (canary rollout, deployment queue)
 
-Training approaches:
+Training scripts (platform/training/):
   - Reinforcement Learning: PPO (locomotion), SAC+HER (reach, grasp)
   - Offline RL: CQL from collected S3 experience (no env interaction)
   - Supervised: Behavior cloning from expert demos or filtered experience
   - Unsupervised: Autoencoder for 86→32-dim representation learning
-  - Typical workflow: BC pre-train → RL fine-tune (pass BC model as --base-model)
+  - Typical workflow: BC pre-train → RL fine-tune (pass BC model as --base-model; run standalone)
 
-Triggers: manual API, cron schedule, or success_rate drop below threshold
+Trigger: POST /api/v1/training/pipelines. (RetrainingMonitorWorkflow, which retrains
+when success_rate drops, is registered on the worker but nothing starts it yet.)
 ```
 
 ### RL Feedback Loop (Closed)
@@ -275,15 +313,15 @@ Robot runs in production/simulation
   → Experience writer: (obs, action, reward, done) → S3 NDJSON batches
   → Processor aggregates uptime → model registry success_rate
                                                     ↓
-  success_rate drops? → Temporal triggers TrainingPipelineWorkflow
-  → Kubeflow trains on FleetOS-Humanoid-v2 + experience from S3
-  → Multiple training modes available:
-      • Online RL (PPO/SAC+HER) from simulator interaction
-      • Offline RL (CQL) from collected S3 experience
-      • BC pre-train → RL fine-tune for faster convergence
+  success_rate drops? → TrainingPipelineWorkflow (via RetrainingMonitorWorkflow —
+    designed, not yet started automatically; start pipelines via the API today)
+  → Argo or Kubeflow trains on FleetOS-Humanoid-v2 (online RL; experience-based
+    retraining is not wired into the pipeline yet — CollectExperienceStats is a placeholder)
+  → Evaluation gate rejects models that don't clear the pass rate / baseline
   → New policy uploaded to S3 → registered as staged
-  → Canary deploy: 5% → 25% → 50% → 100% (with auto-rollback)
-  → Robots get new inference_model_id → inference uses it
+  → Canary deploy: assign 5% → observe → 25% → 50% → 100% (with auto-rollback)
+  → Robots get new inference_model_id → API inference requests are routed to that artifact
+    (the simulator still calls inference directly and gets the fleet-wide active model)
   → Performance metrics flow back → loop continues
 ```
 
@@ -301,8 +339,8 @@ go test -race ./internal/... ./test/...
 | Backend | Go 1.26, gRPC, Protocol Buffers, net/http |
 | Frontend | React 19, TypeScript, Three.js, Vite |
 | Orchestration | Temporal (commands, deployments, training pipeline, billing, webhooks) |
-| ML Training | Kubeflow (PyTorchJob, Katib HPO), SB3 PPO/SAC/CQL, behavior cloning, autoencoder |
-| ML Compute | GPU nodes (g5.2xlarge), scale-from-zero, IRSA for S3 |
+| ML Training | Argo Workflows, Kubeflow Trainer v2 (TrainJob), Katib HPO, SB3 PPO/SAC/CQL, behavior cloning, autoencoder |
+| ML Compute | CPU on local k3s (verified); AWS design: GPU nodes (g5.2xlarge, scale-from-zero), IRSA for S3 (not verified) |
 | AI/ML | Python, SB3, sb3-contrib, PyTorch, MuJoCo, FAISS, experience replay |
 | Messaging | Kafka (telemetry, commands, acks, deployment events) |
 | Storage | PostgreSQL 16, Redis 7, MinIO (S3), ClickHouse |

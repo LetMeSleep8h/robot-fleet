@@ -38,7 +38,7 @@ func (s *PostgresStore) GetModel(ctx context.Context, id string) (*ModelRecord, 
 		FROM model_registry WHERE id = $1
 	`, id).Scan(&m.ID, &m.Name, &m.Version, &m.ArtifactURL, &m.Status, &m.Metrics, &m.CreatedAt, &m.DeployedAt)
 	if err != nil {
-		return nil, fmt.Errorf("get model %s: %w", id, err)
+		return nil, fmt.Errorf("get model %s: %w", id, notFoundOr(err))
 	}
 	return m, nil
 }

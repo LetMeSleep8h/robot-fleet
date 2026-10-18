@@ -33,7 +33,7 @@ func (h *TrainingHandler) SubmitJob(w http.ResponseWriter, r *http.Request) {
 	job, err := h.svc.SubmitJob(r.Context(), tenantID, tenantID, req)
 	if err != nil {
 		slog.Error("submit training job failed", "error", err)
-		writeError(w, http.StatusInternalServerError, "failed to submit training job")
+		writeServiceError(w, err, "failed to submit training job")
 		return
 	}
 
@@ -93,7 +93,7 @@ func (h *TrainingHandler) SubmitEval(w http.ResponseWriter, r *http.Request) {
 	eval, err := h.svc.SubmitEval(r.Context(), tenantID, req)
 	if err != nil {
 		slog.Error("submit eval failed", "error", err)
-		writeError(w, http.StatusInternalServerError, "failed to submit evaluation")
+		writeServiceError(w, err, "failed to submit evaluation")
 		return
 	}
 
@@ -146,7 +146,7 @@ func (h *TrainingHandler) TrainingCallback(w http.ResponseWriter, r *http.Reques
 
 	if err := h.svc.HandleTrainingCallback(r.Context(), payload); err != nil {
 		slog.Error("training callback failed", "job", payload.JobID, "error", err)
-		writeError(w, http.StatusInternalServerError, "callback processing failed")
+		writeServiceError(w, err, "callback processing failed")
 		return
 	}
 
@@ -163,7 +163,7 @@ func (h *TrainingHandler) EvalCallback(w http.ResponseWriter, r *http.Request) {
 
 	if err := h.svc.HandleEvalCallback(r.Context(), payload); err != nil {
 		slog.Error("eval callback failed", "eval", payload.EvalID, "error", err)
-		writeError(w, http.StatusInternalServerError, "callback processing failed")
+		writeServiceError(w, err, "callback processing failed")
 		return
 	}
 

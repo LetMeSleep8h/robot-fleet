@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/dimuthu/robot-fleet/internal/store"
@@ -20,7 +21,7 @@ const (
 const (
 	DefaultTrainingTimesteps = 1_000_000
 	DefaultTrainingAlgorithm = "PPO"
-	DefaultTrainingEnv       = "Humanoid-v4"
+	DefaultTrainingEnv       = "FleetOS-Humanoid-v2" // the env the inference service serves (86-dim obs)
 	DefaultTrainingDevice    = "auto"
 	DefaultEvalScenarios     = 100
 )
@@ -63,10 +64,10 @@ type EvalCallbackPayload struct {
 	ErrorMessage    string         `json:"error_message,omitempty"`
 }
 
-// JobSubmitter abstracts Kubernetes Job creation so we can mock it in tests.
+// JobSubmitter starts training and evaluation runs (Argo workflows in practice).
 type JobSubmitter interface {
 	SubmitTrainingJob(ctx context.Context, job *store.TrainingJobRecord) error
-	SubmitEvalJob(ctx context.Context, eval *store.TrainingEvalRecord, artifactURL string) error
+	SubmitEvalJob(ctx context.Context, eval *store.TrainingEvalRecord, job *store.TrainingJobRecord) error
 }
 
 // TrainingService defines the business logic for Cyclotron-style training.
@@ -86,15 +87,23 @@ type trainingService struct {
 	submitter JobSubmitter
 }
 
-// NewTrainingService creates a new training service.
+// NewTrainingService creates a new training service. A nil submitter means
+// training is not configured: submissions fail with ErrUnavailable instead of
+// recording jobs that will never run.
 func NewTrainingService(repo store.TrainingRepository, submitter JobSubmitter) TrainingService {
 	return &trainingService{repo: repo, submitter: submitter}
 }
 
 func (s *trainingService) SubmitJob(ctx context.Context, tenantID, initiatedBy string, req SubmitTrainingJobRequest) (*store.TrainingJobRecord, error) {
-	algorithm := req.Algorithm
+	if s.submitter == nil {
+		return nil, fmt.Errorf("submit training job: training is not configured (set ARGO_SERVER_URL): %w", ErrUnavailable)
+	}
+	algorithm := strings.ToUpper(req.Algorithm)
 	if algorithm == "" {
 		algorithm = DefaultTrainingAlgorithm
+	}
+	if _, err := templatesFor(algorithm); err != nil {
+		return nil, fmt.Errorf("submit training job: %w", err)
 	}
 	env := req.Environment
 	if env == "" {
@@ -132,18 +141,33 @@ func (s *trainingService) SubmitJob(ctx context.Context, tenantID, initiatedBy s
 		return nil, fmt.Errorf("create training job: %w", err)
 	}
 
-	// Submit to Kubernetes/Kubeflow (async — errors are non-fatal, job stays queued)
-	if s.submitter != nil {
-		if err := s.submitter.SubmitTrainingJob(ctx, job); err != nil {
-			// Mark as failed if submission itself fails
-			_ = s.repo.UpdateTrainingJobCompleted(ctx, job.ID, TrainingStatusFailed, "", err.Error())
-			job.Status = TrainingStatusFailed
-			job.ErrorMessage = err.Error()
-			return job, nil
-		}
-		_ = s.repo.UpdateTrainingJobStatus(ctx, job.ID, TrainingStatusRunning)
-		job.Status = TrainingStatusRunning
+	// The training workflow evaluates the model as its last step and reports
+	// under the job's ID, so record that evaluation up front for its callback.
+	builtinEval := &store.TrainingEvalRecord{
+		ID:             job.ID,
+		TenantID:       tenantID,
+		JobID:          job.ID,
+		Status:         TrainingStatusQueued,
+		ScenariosTotal: DefaultEvalScenarios,
+		Metrics:        map[string]any{},
+		Results:        map[string]any{},
+		CreatedAt:      job.CreatedAt,
 	}
+	if err := s.repo.CreateTrainingEval(ctx, builtinEval); err != nil {
+		return nil, fmt.Errorf("create evaluation for training job %s: %w", job.ID, err)
+	}
+
+	if err := s.submitter.SubmitTrainingJob(ctx, job); err != nil {
+		// Keep the record so the failure is visible on the job.
+		_ = s.repo.UpdateTrainingJobCompleted(ctx, job.ID, TrainingStatusFailed, "", err.Error()) // best-effort; failure returned on the job
+		job.Status = TrainingStatusFailed
+		job.ErrorMessage = err.Error()
+		return job, nil
+	}
+	if err := s.repo.UpdateTrainingJobStatus(ctx, job.ID, TrainingStatusRunning); err != nil {
+		return nil, fmt.Errorf("mark training job %s running: %w", job.ID, err)
+	}
+	job.Status = TrainingStatusRunning
 
 	return job, nil
 }
@@ -178,8 +202,17 @@ func (s *trainingService) HandleTrainingCallback(ctx context.Context, payload Tr
 		return fmt.Errorf("update training job on callback: %w", err)
 	}
 
-	if payload.Metrics != nil {
-		_ = s.repo.UpdateTrainingJobMetrics(ctx, payload.JobID, payload.Metrics)
+	metrics := payload.Metrics
+	if payload.EvalMeanReward != 0 {
+		if metrics == nil {
+			metrics = map[string]any{}
+		}
+		metrics["eval_mean_reward"] = payload.EvalMeanReward
+	}
+	if metrics != nil {
+		if err := s.repo.UpdateTrainingJobMetrics(ctx, payload.JobID, metrics); err != nil {
+			return fmt.Errorf("update training job metrics on callback: %w", err)
+		}
 	}
 
 	return nil
@@ -193,7 +226,10 @@ func (s *trainingService) SubmitEval(ctx context.Context, tenantID string, req S
 	}
 
 	if job.Status != TrainingStatusCompleted {
-		return nil, fmt.Errorf("training job %s is %s, must be completed before evaluation", req.JobID, job.Status)
+		return nil, fmt.Errorf("training job %s is %s, must be completed before evaluation: %w", req.JobID, job.Status, ErrConflict)
+	}
+	if s.submitter == nil {
+		return nil, fmt.Errorf("submit evaluation: training is not configured: %w", ErrUnavailable)
 	}
 
 	scenarios := req.Scenarios
@@ -216,13 +252,11 @@ func (s *trainingService) SubmitEval(ctx context.Context, tenantID string, req S
 		return nil, fmt.Errorf("create training eval: %w", err)
 	}
 
-	if s.submitter != nil {
-		if err := s.submitter.SubmitEvalJob(ctx, eval, job.ArtifactURL); err != nil {
-			_ = s.repo.UpdateTrainingEvalCompleted(ctx, eval.ID, 0, scenarios, 0, nil, err.Error())
-			eval.Status = TrainingStatusFailed
-			eval.ErrorMessage = err.Error()
-			return eval, nil
-		}
+	if err := s.submitter.SubmitEvalJob(ctx, eval, job); err != nil {
+		_ = s.repo.UpdateTrainingEvalCompleted(ctx, eval.ID, 0, scenarios, 0, nil, err.Error()) // best-effort; failure returned on the eval
+		eval.Status = TrainingStatusFailed
+		eval.ErrorMessage = err.Error()
+		return eval, nil
 	}
 
 	return eval, nil

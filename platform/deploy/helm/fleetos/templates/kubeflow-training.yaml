@@ -1,135 +1,106 @@
 {{- if .Values.kubeflow.enabled }}
-# Kubeflow Training Operator PyTorchJob template for FleetOS locomotion training.
-# Temporal submits training jobs by creating PyTorchJob CRDs via the K8s API.
-# This template defines the base configuration; Temporal activities override
-# job-specific fields (job-id, timesteps, base-model, from-experience).
-
+# Kubeflow training backend for the Temporal training pipeline.
+# Requires Kubeflow Trainer v2 (TrainJob CRDs) and Katib installed in the
+# cluster — see scripts/k3s-setup.sh. The worker creates:
+#   - TrainJobs on the fleetos-sb3 runtime (train, then evaluate)
+#   - Katib Experiments (hyperparameter search) whose trials are batch Jobs
+# in .Values.kubeflow.namespace.
 ---
-# ServiceAccount with IRSA for S3 access
 apiVersion: v1
-kind: ServiceAccount
+kind: Namespace
+metadata:
+  name: {{ .Values.kubeflow.namespace }}
+  labels:
+    app.kubernetes.io/part-of: fleetos
+    # Katib injects its metrics-collector sidecar into trials in this namespace.
+    katib.kubeflow.org/metrics-collector-injection: enabled
+---
+# S3 + callback settings for training/eval/trial containers.
+apiVersion: v1
+kind: Secret
 metadata:
   name: fleetos-training
   namespace: {{ .Values.kubeflow.namespace }}
-  annotations:
-    # IAM role ARN set by Terraform (IRSA)
-    eks.amazonaws.com/role-arn: {{ .Values.kubeflow.training.iamRoleArn | default "" | quote }}
   labels:
-    app.kubernetes.io/name: fleetos-training
     app.kubernetes.io/part-of: fleetos
-
+type: Opaque
+stringData:
+  S3_ENDPOINT: "{{ .Release.Name }}-minio.{{ .Release.Namespace }}.svc.cluster.local:9000"
+  S3_BUCKET: {{ .Values.training.modelsBucket | default "fleetos-models" | quote }}
+  S3_ACCESS_KEY: {{ .Values.minioStandalone.rootUser | quote }}
+  S3_SECRET_KEY: {{ .Values.minioStandalone.rootPassword | quote }}
+  TRAINING_CALLBACK_URL: "http://{{ .Release.Name }}-api.{{ .Release.Namespace }}.svc.cluster.local:{{ .Values.api.service.port }}/api/v1/internal/training/callback"
+  EVAL_CALLBACK_URL: "http://{{ .Release.Name }}-api.{{ .Release.Namespace }}.svc.cluster.local:{{ .Values.api.service.port }}/api/v1/internal/eval/callback"
 ---
-# ConfigMap with default training configuration
-apiVersion: v1
-kind: ConfigMap
+# Single-node runtime that runs FleetOS training scripts in the training image.
+apiVersion: trainer.kubeflow.org/v1alpha1
+kind: ClusterTrainingRuntime
 metadata:
-  name: fleetos-training-config
-  namespace: {{ .Values.kubeflow.namespace }}
+  name: {{ .Values.kubeflow.runtime }}
   labels:
-    app.kubernetes.io/name: fleetos-training
-data:
-  DEFAULT_TIMESTEPS: {{ .Values.kubeflow.training.defaultTimesteps | quote }}
-  DEFAULT_ENV: {{ .Values.kubeflow.training.defaultEnv | quote }}
-  S3_BUCKET: {{ .Values.kubeflow.training.s3.bucket | quote }}
-  EXPERIENCE_PREFIX: {{ .Values.kubeflow.training.s3.experiencePrefix | quote }}
-  CALLBACK_URL: "http://api.fleetos.svc.cluster.local:8080/api/v1/internal/training/callback"
-
----
-{{- if .Values.kubeflow.katib.enabled }}
-# Katib Experiment template for hyperparameter tuning.
-# Temporal creates Katib Experiments for HPO jobs instead of raw PyTorchJobs.
-apiVersion: kubeflow.org/v1beta1
-kind: Experiment
-metadata:
-  name: fleetos-locomotion-hpo-template
-  namespace: {{ .Values.kubeflow.namespace }}
-  labels:
-    app.kubernetes.io/name: fleetos-training
-  annotations:
-    fleetos.dev/template: "true"
-    fleetos.dev/description: "Template — actual experiments created by Temporal TrainingPipelineWorkflow"
+    trainer.kubeflow.org/framework: torch
+    app.kubernetes.io/part-of: fleetos
 spec:
-  objective:
-    type: maximize
-    goal: 500
-    objectiveMetricName: eval_mean_reward
-    additionalMetricNames:
-      - mean_reward
-      - mean_length
-  algorithm:
-    algorithmName: bayesianoptimization
-  parallelTrialCount: {{ .Values.kubeflow.katib.parallelTrials }}
-  maxTrialCount: {{ .Values.kubeflow.katib.maxTrials }}
-  maxFailedTrialCount: 3
-  parameters:
-    - name: learning_rate
-      parameterType: double
-      feasibleSpace:
-        min: {{ .Values.kubeflow.katib.parameters.learningRate.min | quote }}
-        max: {{ .Values.kubeflow.katib.parameters.learningRate.max | quote }}
-    - name: batch_size
-      parameterType: categorical
-      feasibleSpace:
-        list:
-          {{- range .Values.kubeflow.katib.parameters.batchSize.values }}
-          - {{ . | quote }}
-          {{- end }}
-    - name: n_epochs
-      parameterType: int
-      feasibleSpace:
-        min: {{ .Values.kubeflow.katib.parameters.nEpochs.min | quote }}
-        max: {{ .Values.kubeflow.katib.parameters.nEpochs.max | quote }}
-  trialTemplate:
-    primaryContainerName: training
-    trialParameters:
-      - name: learningRate
-        reference: learning_rate
-      - name: batchSize
-        reference: batch_size
-      - name: nEpochs
-        reference: n_epochs
-    trialSpec:
-      apiVersion: batch/v1
-      kind: Job
-      spec:
-        template:
-          metadata:
-            annotations:
-              sidecar.istio.io/inject: "false"
-          spec:
-            serviceAccountName: fleetos-training
-            containers:
-              - name: training
-                image: "{{ .Values.kubeflow.training.image.repository }}:{{ .Values.kubeflow.training.image.tag }}"
-                command:
-                  - python3
-                  - train_locomotion.py
-                args:
-                  - "--job-id=$(JOB_ID)"
-                  - "--timesteps={{ .Values.kubeflow.training.defaultTimesteps }}"
-                  - "--env-id={{ .Values.kubeflow.training.defaultEnv }}"
-                  - "--device=cuda"
-                  - "--learning-rate=${trialParameters.learningRate}"
-                  - "--batch-size=${trialParameters.batchSize}"
-                  - "--n-epochs=${trialParameters.nEpochs}"
-                envFrom:
-                  - configMapRef:
-                      name: fleetos-training-config
-                env:
-                  - name: S3_ENDPOINT
-                    value: {{ .Values.kubeflow.training.s3.endpoint | default "" | quote }}
-                  - name: S3_BUCKET
-                    value: {{ .Values.kubeflow.training.s3.bucket | quote }}
-                resources:
-                  {{- toYaml .Values.kubeflow.training.resources | nindent 18 }}
-                {{- with .Values.kubeflow.training.tolerations }}
-                tolerations:
-                  {{- toYaml . | nindent 18 }}
-                {{- end }}
-            {{- with .Values.kubeflow.training.nodeSelector }}
-            nodeSelector:
-              {{- toYaml . | nindent 14 }}
-            {{- end }}
-            restartPolicy: Never
-{{- end }}
+  mlPolicy:
+    numNodes: 1
+  template:
+    spec:
+      replicatedJobs:
+        - name: node
+          template:
+            metadata:
+              labels:
+                trainer.kubeflow.org/trainjob-ancestor-step: trainer
+            spec:
+              template:
+                spec:
+                  containers:
+                    - name: node
+                      image: "{{ .Values.kubeflow.image.repository }}:{{ .Values.kubeflow.image.tag }}"
+                      imagePullPolicy: {{ .Values.kubeflow.imagePullPolicy }}
+                      envFrom:
+                        - secretRef:
+                            name: fleetos-training
+                      resources:
+                        {{- toYaml .Values.kubeflow.resources | nindent 24 }}
+---
+# The worker creates TrainJobs and Katib Experiments in the training namespace only.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ .Release.Name }}-worker
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app.kubernetes.io/part-of: fleetos
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: fleetos-training-submitter
+  namespace: {{ .Values.kubeflow.namespace }}
+  labels:
+    app.kubernetes.io/part-of: fleetos
+rules:
+  - apiGroups: ["trainer.kubeflow.org"]
+    resources: ["trainjobs"]
+    verbs: ["create", "get", "list", "watch"]
+  - apiGroups: ["kubeflow.org"]
+    resources: ["experiments", "trials"]
+    verbs: ["create", "get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ .Release.Name }}-worker-training-submitter
+  namespace: {{ .Values.kubeflow.namespace }}
+  labels:
+    app.kubernetes.io/part-of: fleetos
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: fleetos-training-submitter
+subjects:
+  - kind: ServiceAccount
+    name: {{ .Release.Name }}-worker
+    namespace: {{ .Release.Namespace }}
 {{- end }}

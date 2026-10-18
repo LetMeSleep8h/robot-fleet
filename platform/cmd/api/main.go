@@ -12,11 +12,13 @@ import (
 	"time"
 
 	"github.com/dimuthu/robot-fleet/internal/api"
+	"github.com/dimuthu/robot-fleet/internal/argo"
 	"github.com/dimuthu/robot-fleet/internal/auth"
 	"github.com/dimuthu/robot-fleet/internal/command"
 	"github.com/dimuthu/robot-fleet/internal/config"
 	"github.com/dimuthu/robot-fleet/internal/ingestion"
 	"github.com/dimuthu/robot-fleet/internal/middleware"
+	"github.com/dimuthu/robot-fleet/internal/modelgate"
 	"github.com/dimuthu/robot-fleet/internal/service"
 	"github.com/dimuthu/robot-fleet/internal/store"
 	temporalpkg "github.com/dimuthu/robot-fleet/internal/temporal"
@@ -134,25 +136,39 @@ func main() {
 	if temporalClient != nil {
 		robotOpts = append(robotOpts, service.WithTemporalRobotClient(temporalClient))
 	}
+	robotOpts = append(robotOpts, service.WithModelLookup(pg))
 	robotSvc := service.NewRobotService(pg, redis, cmdReg, cfg.InferenceEndpoint, cfg.InferenceTimeout, robotOpts...)
-	modelSvc := service.NewModelRegistryService(pg, redis)
+
+	// Model registry: deploys are gated on eval metrics and rolled out as a
+	// Temporal canary. Without Temporal, deploy requests return 503.
+	modelOpts := []service.ModelServiceOption{
+		service.WithModelGate(modelgate.Policy{MinPassRate: cfg.MinEvalPassRate, MaxRewardRegression: modelgate.DefaultMaxRewardRegression}),
+	}
+	if temporalClient != nil {
+		modelOpts = append(modelOpts, service.WithCanaryStarter(service.NewTemporalCanaryStarter(temporalClient)))
+	} else {
+		slog.Warn("temporal disabled: model deployments (canary rollouts) unavailable")
+	}
+	modelSvc := service.NewModelRegistryService(pg, redis, modelOpts...)
 	agentOpts := []service.AgentServiceOption{}
 	if temporalClient != nil {
 		agentOpts = append(agentOpts, service.WithTemporalClient(temporalClient))
 	}
 	agentSvc := service.NewAgentService(pg, pg, agentOpts...)
 
-	// Training service (Kubeflow / K8s job submission)
+	// Training service (Argo Workflows). Without ARGO_SERVER_URL, training
+	// requests return 503 rather than recording jobs that never run.
 	var jobSubmitter service.JobSubmitter
-	if cfg.TrainingEnabled {
-		jobSubmitter = service.NewK8sJobSubmitter(
-			cfg.TrainingImage, cfg.S3Endpoint, cfg.S3Bucket,
-			cfg.S3AccessKey, cfg.S3SecretKey, cfg.TrainingCallbackURL,
-			cfg.TrainingNamespace,
-		)
-		slog.Info("training enabled", "image", cfg.TrainingImage, "namespace", cfg.TrainingNamespace)
+	if cfg.ArgoServerURL != "" {
+		jobSubmitter = service.NewArgoJobSubmitter(argo.NewClient(argo.Config{
+			ServerURL:          cfg.ArgoServerURL,
+			Namespace:          cfg.ArgoNamespace,
+			Token:              cfg.ArgoToken,
+			InsecureSkipVerify: cfg.ArgoInsecureSkipVerify,
+		}))
+		slog.Info("training enabled", "argo_server", cfg.ArgoServerURL, "namespace", cfg.ArgoNamespace)
 	} else {
-		jobSubmitter = &service.NoOpSubmitter{}
+		slog.Warn("ARGO_SERVER_URL not set: training endpoints disabled")
 	}
 	trainingSvc := service.NewTrainingService(pg, jobSubmitter)
 
@@ -193,6 +209,8 @@ func main() {
 	agentHandler.SetDeploymentEventConsumer(deployEventConsumer)
 
 	trainingHandler := api.NewTrainingHandler(trainingSvc)
+	// Full MLOps pipeline ([Katib] → train → evaluate → gate → register → canary).
+	pipelineHandler := api.NewPipelineHandler(service.NewPipelineService(temporalClient))
 	webhookHandler := api.NewWebhookHandler(webhookSvc)
 	safetyHandler := api.NewSafetyHandler(safetySvc)
 	skillsHandler := api.NewSkillsHandler(skillsSvc)
@@ -221,7 +239,7 @@ func main() {
 	authedMux.HandleFunc("GET /api/v1/robots/{id}/commands", handler.GetCommandHistory)
 	authedMux.HandleFunc("GET /api/v1/robots/{id}/telemetry", handler.GetTelemetry)
 	authedMux.HandleFunc("POST /api/v1/inference", handler.RunInference)
-authedMux.HandleFunc("GET /api/v1/fleet/metrics", handler.GetFleetMetrics)
+	authedMux.HandleFunc("GET /api/v1/fleet/metrics", handler.GetFleetMetrics)
 	authedMux.HandleFunc("GET /api/v1/usage", handler.GetUsage)
 	// Model registry routes
 	authedMux.HandleFunc("POST /api/v1/models", modelHandler.RegisterModel)
@@ -239,6 +257,8 @@ authedMux.HandleFunc("GET /api/v1/fleet/metrics", handler.GetFleetMetrics)
 	authedMux.HandleFunc("GET /api/v1/deployments/{id}", agentHandler.GetDeployment)
 	authedMux.HandleFunc("GET /api/v1/deployments/{id}/stream", agentHandler.StreamDeployment)
 	// Training API routes (Cyclotron-style)
+	authedMux.HandleFunc("POST /api/v1/training/pipelines", pipelineHandler.StartPipeline)
+	authedMux.HandleFunc("GET /api/v1/training/pipelines/{id}", pipelineHandler.GetPipeline)
 	authedMux.HandleFunc("POST /api/v1/locomotion/jobs", trainingHandler.SubmitJob)
 	authedMux.HandleFunc("GET /api/v1/locomotion/jobs", trainingHandler.ListJobs)
 	authedMux.HandleFunc("GET /api/v1/locomotion/jobs/{id}", trainingHandler.GetJob)

@@ -2,7 +2,7 @@
 SB3 PPO training script for FleetOS humanoid locomotion.
 
 Supports two modes:
-  1. From scratch: Train on FleetOS-Humanoid-v1 (custom lab environment)
+  1. From scratch: Train on FleetOS-Humanoid-v2 (custom lab environment)
   2. From experience: Fine-tune existing policy using collected experience from S3
 
 Runs as a Kubernetes Job / Kubeflow Pipeline component.
@@ -121,9 +121,9 @@ def train(args):
                 _load_experience_into_buffer(args, model)
         else:
             print(f"[train] Base model not found, training from scratch")
-            model = _create_model(env, args.device)
+            model = _create_model(env, args.device, hyperparameters(args))
     else:
-        model = _create_model(env, args.device)
+        model = _create_model(env, args.device, hyperparameters(args))
 
     # Train with metrics callback
     metrics_path = str(output_dir / "metrics.json")
@@ -175,11 +175,8 @@ def train(args):
         "from_experience": args.from_experience or None,
         "hyperparameters": {
             "algorithm": "PPO",
-            "learning_rate": 3e-4,
-            "n_steps": 2048,
-            "batch_size": 64,
+            **hyperparameters(args),
             "n_epochs": 10,
-            "gamma": 0.99,
             "net_arch": [256, 256],
         },
     }
@@ -188,6 +185,8 @@ def train(args):
 
     print(f"[train] Training complete: reward={mean_reward:.1f}+/-{std_reward:.1f}, "
           f"duration={train_duration:.0f}s")
+    # Objective line for Katib's StdOut metrics collector (name=value).
+    print(katib_metric_line(mean_reward), flush=True)
 
     # Upload to S3 if configured
     if args.s3_endpoint:
@@ -200,19 +199,35 @@ def train(args):
     return results
 
 
-def _create_model(env, device: str) -> PPO:
-    """Create a fresh PPO model with tuned hyperparameters."""
+def hyperparameters(args) -> dict:
+    """The tunable PPO hyperparameters (searched over by Katib)."""
+    return {
+        "learning_rate": args.learning_rate,
+        "n_steps": args.n_steps,
+        "batch_size": args.batch_size,
+        "gamma": args.gamma,
+        "ent_coef": args.ent_coef,
+    }
+
+
+def katib_metric_line(mean_reward: float) -> str:
+    """Format the evaluation objective for Katib's StdOut metrics collector."""
+    return f"eval_mean_reward={float(mean_reward):.2f}"
+
+
+def _create_model(env, device: str, hp: dict) -> PPO:
+    """Create a fresh PPO model with the given tunable hyperparameters."""
     return PPO(
         "MlpPolicy",
         env,
-        learning_rate=3e-4,
-        n_steps=2048,
-        batch_size=64,
+        learning_rate=hp["learning_rate"],
+        n_steps=hp["n_steps"],
+        batch_size=hp["batch_size"],
         n_epochs=10,
-        gamma=0.99,
+        gamma=hp["gamma"],
         gae_lambda=0.95,
         clip_range=0.2,
-        ent_coef=0.0,
+        ent_coef=hp["ent_coef"],
         verbose=1,
         device=device,
         policy_kwargs=dict(
@@ -332,7 +347,10 @@ def upload_to_s3(args, output_dir: Path):
                 print(f"[s3] Uploaded {key}")
 
     except Exception as e:
-        print(f"[s3] Upload failed (non-fatal): {e}")
+        # Fatal: without policy.zip in S3 nothing downstream (eval, registry,
+        # inference) can use this run, so the workflow step must fail.
+        print(f"[s3] Upload failed: {e}")
+        raise
 
 
 def notify_callback(url: str, results: dict):
@@ -349,14 +367,14 @@ def notify_callback(url: str, results: dict):
         print(f"[callback] Failed (non-fatal): {e}")
 
 
-if __name__ == "__main__":
+def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Train locomotion policy")
     parser.add_argument("--job-id", required=True, help="Training job ID")
     parser.add_argument("--timesteps", type=int, default=1_000_000)
     parser.add_argument("--device", default="auto", help="cpu, cuda, or auto")
     parser.add_argument("--output-dir", default="/tmp/training-output")
-    parser.add_argument("--env-id", default="FleetOS-Humanoid-v1",
-                        help="Gymnasium environment ID (default: FleetOS-Humanoid-v1)")
+    parser.add_argument("--env-id", default="FleetOS-Humanoid-v2",
+                        help="Gymnasium environment ID (default: FleetOS-Humanoid-v2)")
     parser.add_argument("--base-model", default="",
                         help="S3 key for base model to fine-tune (e.g. training/job123/policy.zip)")
     parser.add_argument("--from-experience", default="",
@@ -366,6 +384,14 @@ if __name__ == "__main__":
     parser.add_argument("--s3-access-key", default=os.getenv("S3_ACCESS_KEY", "fleetos"))
     parser.add_argument("--s3-secret-key", default=os.getenv("S3_SECRET_KEY", "fleetos123"))
     parser.add_argument("--callback-url", default=os.getenv("TRAINING_CALLBACK_URL", ""))
-    args = parser.parse_args()
+    # Tunable PPO hyperparameters (defaults are the previously hard-coded values)
+    parser.add_argument("--learning-rate", type=float, default=3e-4)
+    parser.add_argument("--n-steps", type=int, default=2048)
+    parser.add_argument("--batch-size", type=int, default=64)
+    parser.add_argument("--gamma", type=float, default=0.99)
+    parser.add_argument("--ent-coef", type=float, default=0.0)
+    return parser
 
-    train(args)
+
+if __name__ == "__main__":
+    train(build_parser().parse_args())

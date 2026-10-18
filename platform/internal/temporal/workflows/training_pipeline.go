@@ -7,35 +7,43 @@ import (
 	"go.temporal.io/sdk/temporal"
 	"go.temporal.io/sdk/workflow"
 
+	temporalpkg "github.com/dimuthu/robot-fleet/internal/temporal"
 	"github.com/dimuthu/robot-fleet/internal/temporal/activities"
 )
 
 // TrainingPipelineInput is the input for TrainingPipelineWorkflow.
 type TrainingPipelineInput struct {
 	JobID          string `json:"job_id"`
-	Timesteps      int    `json:"timesteps"`        // default: 2000000
-	EnvID          string `json:"env_id"`            // default: FleetOS-Humanoid-v1
-	TaskType       string `json:"task_type"`         // "locomotion" or "reach"
-	UseKatib       bool   `json:"use_katib"`         // HPO via Katib
-	AutoDeploy     bool   `json:"auto_deploy"`       // auto canary deploy if evaluation passes
-	BaseModel      string `json:"base_model"`        // S3 key for fine-tuning, empty = from scratch
-	FromExperience bool   `json:"from_experience"`   // include collected experience
+	Timesteps      int    `json:"timesteps"`       // default: 2000000
+	EnvID          string `json:"env_id"`          // empty = WorkflowTemplate default
+	TaskType       string `json:"task_type"`       // "locomotion" or "reach"
+	Backend        string `json:"backend"`         // "argo" (default) or "kubeflow"
+	UseKatib       bool   `json:"use_katib"`       // Katib HPO first; implies the kubeflow backend
+	AutoDeploy     bool   `json:"auto_deploy"`     // auto canary deploy if evaluation passes
+	BaseModel      string `json:"base_model"`      // S3 key for fine-tuning, empty = from scratch
+	FromExperience bool   `json:"from_experience"` // include collected experience
 }
 
 // TrainingPipelineResult is the output of TrainingPipelineWorkflow.
 type TrainingPipelineResult struct {
 	JobID       string  `json:"job_id"`
 	ModelID     string  `json:"model_id"`
-	Phase       string  `json:"phase"`     // "trained", "registered", "deployed", "failed", "gated"
+	Phase       string  `json:"phase"` // "trained", "registered", "deployed", "failed", "gated"
 	MeanReward  float64 `json:"mean_reward"`
+	PassRate    float64 `json:"pass_rate"`
 	Improvement float64 `json:"improvement_pct"`
+	GateReason  string  `json:"gate_reason,omitempty"`
+	// Set when a Katib search chose the hyperparameters.
+	HPOExperiment string            `json:"hpo_experiment,omitempty"`
+	BestParams    map[string]string `json:"best_params,omitempty"`
 }
 
 // SignalRetrain is the signal name to trigger retraining.
 const SignalRetrain = "retrain"
 
 // TrainingPipelineWorkflow orchestrates the full ML lifecycle:
-// collect experience → submit Kubeflow training → evaluate → register → canary deploy.
+// [Katib hyperparameter search] → train + evaluate (Argo workflow or Kubeflow
+// TrainJobs) → gate on the evaluation results → register → canary deploy.
 //
 // Can be triggered by:
 // 1. Manual API call (POST /api/v1/locomotion/jobs)
@@ -46,9 +54,6 @@ func TrainingPipelineWorkflow(ctx workflow.Context, input TrainingPipelineInput)
 
 	if input.Timesteps == 0 {
 		input.Timesteps = 2_000_000
-	}
-	if input.EnvID == "" {
-		input.EnvID = "FleetOS-Humanoid-v1"
 	}
 	if input.TaskType == "" {
 		input.TaskType = "locomotion"
@@ -103,37 +108,50 @@ func TrainingPipelineWorkflow(ctx workflow.Context, input TrainingPipelineInput)
 		}
 	}
 
-	// Step 2: Find current baseline model for comparison
-	baseModel := input.BaseModel
-	baselineModelID := "" // caller provides via input.BaseModel, or empty = train from scratch
+	// Step 2 (optional): Katib hyperparameter search. Katib runs on Kubeflow,
+	// so the final training run uses the kubeflow backend too.
+	if input.UseKatib {
+		input.Backend = activities.BackendKubeflow
+		var search activities.HyperparameterSearchOutput
+		if err := workflow.ExecuteActivity(longActCtx, "RunHyperparameterSearch", activities.HyperparameterSearchInput{
+			JobID:    input.JobID,
+			TaskType: input.TaskType,
+			EnvID:    input.EnvID,
+		}).Get(ctx, &search); err != nil {
+			result.Phase = "failed"
+			return result, fmt.Errorf("hyperparameter search failed: %w", err)
+		}
+		result.HPOExperiment = search.Experiment
+		result.BestParams = search.BestParams
+		logger.Info("katib search complete", "experiment", search.Experiment, "best_params", search.BestParams, "objective", search.BestObjective)
+	}
 
-	// Step 3: Submit training to Kubeflow
-	logger.Info("submitting training", "job_id", input.JobID, "timesteps", input.Timesteps, "katib", input.UseKatib)
+	// Step 3: Train + evaluate on the chosen backend (blocks until done)
+	logger.Info("submitting training", "job_id", input.JobID, "timesteps", input.Timesteps, "backend", input.Backend)
 
-	var trainResult activities.SubmitKubeflowRunOutput
-	err := workflow.ExecuteActivity(longActCtx, "SubmitKubeflowRun", activities.SubmitKubeflowRunInput{
-		JobID:          input.JobID,
-		Timesteps:      input.Timesteps,
-		EnvID:          input.EnvID,
-		BaseModel:      baseModel,
-		FromExperience: experiencePrefix,
-		UseKatib:       input.UseKatib,
-		TaskType:       input.TaskType,
-		Algorithm:      algorithm,
+	var trainResult activities.SubmitTrainingRunOutput
+	err := workflow.ExecuteActivity(longActCtx, "SubmitTrainingRun", activities.SubmitTrainingRunInput{
+		JobID:           input.JobID,
+		Timesteps:       input.Timesteps,
+		EnvID:           input.EnvID,
+		BaseModel:       input.BaseModel,
+		FromExperience:  experiencePrefix,
+		TaskType:        input.TaskType,
+		Algorithm:       algorithm,
+		Backend:         input.Backend,
+		Hyperparameters: result.BestParams,
 	}).Get(ctx, &trainResult)
 	if err != nil {
 		result.Phase = "failed"
 		return result, fmt.Errorf("training submission failed: %w", err)
 	}
 
-	logger.Info("training submitted", "run_id", trainResult.RunID, "model_path", trainResult.ModelPath)
+	logger.Info("training finished", "run_id", trainResult.RunID, "model_path", trainResult.ModelPath)
 
-	// Step 4: Evaluate trained model against baseline
+	// Step 4: Gate on this job's evaluation results vs the deployed baseline
 	var evalResult activities.EvaluateModelOutput
 	err = workflow.ExecuteActivity(actCtx, "EvaluateTrainedModel", activities.EvaluateModelInput{
-		ModelArtifactURL: trainResult.ModelPath,
-		BaselineModelID:  baselineModelID,
-		EvalEpisodes:     20,
+		JobID: input.JobID,
 	}).Get(ctx, &evalResult)
 	if err != nil {
 		result.Phase = "failed"
@@ -141,15 +159,14 @@ func TrainingPipelineWorkflow(ctx workflow.Context, input TrainingPipelineInput)
 	}
 
 	result.MeanReward = evalResult.MeanReward
+	result.PassRate = evalResult.PassRate
 	result.Improvement = evalResult.Improvement
 
 	// Gate: only proceed if model passes evaluation threshold
 	if !evalResult.PassesGate {
 		result.Phase = "gated"
-		logger.Warn("model did not pass evaluation gate",
-			"mean_reward", evalResult.MeanReward,
-			"baseline", evalResult.BaselineReward,
-		)
+		result.GateReason = evalResult.GateReason
+		logger.Warn("model did not pass evaluation gate", "reason", evalResult.GateReason)
 		_ = workflow.ExecuteActivity(actCtx, "NotifyTrainingComplete", input.JobID, false).Get(ctx, nil)
 		return result, nil
 	}
@@ -171,13 +188,17 @@ func TrainingPipelineWorkflow(ctx workflow.Context, input TrainingPipelineInput)
 		name = "autoencoder"
 	}
 	err = workflow.ExecuteActivity(actCtx, "RegisterTrainedModel", activities.RegisterTrainedModelInput{
-		Name:        name,
-		Version:     version,
-		ArtifactURL: trainResult.ModelPath,
-		MeanReward:  evalResult.MeanReward,
-		Environment: input.EnvID,
-		TaskType:    input.TaskType,
-		Algorithm:   algorithm,
+		Name:            name,
+		Version:         version,
+		ArtifactURL:     trainResult.ModelPath,
+		MeanReward:      evalResult.MeanReward,
+		PassRate:        evalResult.PassRate,
+		Environment:     input.EnvID,
+		TaskType:        input.TaskType,
+		Algorithm:       algorithm,
+		Backend:         backendName(input.Backend),
+		Hyperparameters: result.BestParams,
+		HPOExperiment:   result.HPOExperiment,
 	}).Get(ctx, &modelID)
 	if err != nil {
 		result.Phase = "failed"
@@ -194,6 +215,8 @@ func TrainingPipelineWorkflow(ctx workflow.Context, input TrainingPipelineInput)
 
 		childCtx := workflow.WithChildOptions(ctx, workflow.ChildWorkflowOptions{
 			WorkflowID: fmt.Sprintf("deploy-%s", modelID),
+			// Deployment activities are registered on the deployment worker only.
+			TaskQueue: temporalpkg.TaskQueueDeployment,
 		})
 
 		var deployResult DeploymentWorkflowResult
@@ -213,4 +236,12 @@ func TrainingPipelineWorkflow(ctx workflow.Context, input TrainingPipelineInput)
 	_ = workflow.ExecuteActivity(actCtx, "NotifyTrainingComplete", modelID, result.Phase == "deployed").Get(ctx, nil)
 
 	return result, nil
+}
+
+// backendName normalizes the training backend for the registry record.
+func backendName(b string) string {
+	if b == "" {
+		return activities.BackendArgo
+	}
+	return b
 }

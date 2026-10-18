@@ -33,7 +33,7 @@ func (s *PostgresStore) GetTrainingJob(ctx context.Context, id string) (*Trainin
 		&j.Timesteps, &j.Device, &j.Config, &j.Metrics, &j.ArtifactURL,
 		&j.ErrorMessage, &j.InitiatedBy, &j.CreatedAt, &j.StartedAt, &j.CompletedAt)
 	if err != nil {
-		return nil, fmt.Errorf("get training job %s: %w", id, err)
+		return nil, fmt.Errorf("get training job %s: %w", id, notFoundOr(err))
 	}
 	if agentID != nil {
 		j.AgentID = *agentID
@@ -110,11 +110,14 @@ func (s *PostgresStore) UpdateTrainingJobMetrics(ctx context.Context, id string,
 
 // UpdateTrainingJobCompleted marks a training job as completed or failed.
 func (s *PostgresStore) UpdateTrainingJobCompleted(ctx context.Context, id, status, artifactURL, errorMsg string) error {
-	_, err := s.pool.Exec(ctx, `
+	tag, err := s.pool.Exec(ctx, `
 		UPDATE training_jobs SET status = $1, artifact_url = $2, error_message = $3, completed_at = $4
 		WHERE id = $5
 	`, status, artifactURL, errorMsg, time.Now().UTC(), id)
 	if err != nil {
+		return fmt.Errorf("complete training job %s: %w", id, notFoundOr(err))
+	}
+	if err := requireRowsAffected(tag); err != nil {
 		return fmt.Errorf("complete training job %s: %w", id, err)
 	}
 	return nil
@@ -143,7 +146,7 @@ func (s *PostgresStore) GetTrainingEval(ctx context.Context, id string) (*Traini
 		&e.ScenariosPassed, &e.PassRate, &e.Metrics, &e.Results,
 		&e.ErrorMessage, &e.CreatedAt, &e.StartedAt, &e.CompletedAt)
 	if err != nil {
-		return nil, fmt.Errorf("get training eval %s: %w", id, err)
+		return nil, fmt.Errorf("get training eval %s: %w", id, notFoundOr(err))
 	}
 	return e, nil
 }
@@ -193,12 +196,15 @@ func (s *PostgresStore) UpdateTrainingEvalCompleted(ctx context.Context, id stri
 	if errorMsg != "" {
 		status = "failed"
 	}
-	_, err := s.pool.Exec(ctx, `
+	tag, err := s.pool.Exec(ctx, `
 		UPDATE training_evaluations SET status = $1, scenarios_passed = $2, scenarios_total = $3,
 			pass_rate = $4, results = $5, error_message = $6, completed_at = $7
 		WHERE id = $8
 	`, status, passed, total, passRate, results, errorMsg, time.Now().UTC(), id)
 	if err != nil {
+		return fmt.Errorf("complete training eval %s: %w", id, notFoundOr(err))
+	}
+	if err := requireRowsAffected(tag); err != nil {
 		return fmt.Errorf("complete training eval %s: %w", id, err)
 	}
 	return nil

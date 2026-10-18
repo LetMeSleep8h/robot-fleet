@@ -202,13 +202,13 @@ kind: Service
 metadata:
   name: {{ .Release.Name }}-grafana
 spec:
-  type: {{ .Values.grafana.service.type | default "ClusterIP" }}
+  type: {{ (.Values.grafana.service).type | default "ClusterIP" }}
   ports:
     - port: 3000
       targetPort: 3000
       name: http
-      {{- if .Values.grafana.service.nodePort }}
-      nodePort: {{ .Values.grafana.service.nodePort }}
+      {{- if (.Values.grafana.service).nodePort }}
+      nodePort: {{ (.Values.grafana.service).nodePort }}
       {{- end }}
   selector:
     app: grafana

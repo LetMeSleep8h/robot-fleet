@@ -1,4 +1,4 @@
-.PHONY: all build test proto docker-build docker-push compose-up compose-down helm-install lint clean
+.PHONY: all build test proto docker-build docker-push compose-up compose-down helm-install lint clean k8s-train k3s-up k3s-images k3s-down k3s-train
 
 # Variables
 REGISTRY ?= fleetos
@@ -129,48 +129,41 @@ k8s-sync:
 k8s-training-image:
 	docker build -t fleetos/training:latest ./training
 
+# Submit a train → evaluate run from the installed WorkflowTemplate
+# (deploy/k8s/workflows/). Model lands at s3://fleetos-models/training/$(JOB_ID)/.
+TRAIN_TASKS := locomotion reach
 k8s-train:
+	@case " $(TRAIN_TASKS) " in *" $(TASK) "*) ;; *) echo "TASK must be one of: $(TRAIN_TASKS) (got '$(TASK)')"; exit 1;; esac
 	@echo "Submitting $(TASK) training: $(TIMESTEPS) steps, job=$(JOB_ID)"
-	kubectl create -f - <<EOF
-	apiVersion: argoproj.io/v1alpha1
-	kind: Workflow
-	metadata:
-	  generateName: fleetos-$(TASK)-
-	spec:
-	  entrypoint: train-and-eval
-	  templates:
-	    - name: train-and-eval
-	      dag:
-	        tasks:
-	          - name: train
-	            template: train-task
-	          - name: evaluate
-	            template: eval-task
-	            dependencies: [train]
-	    - name: train-task
-	      container:
-	        image: fleetos/training:latest
-	        command: [python]
-	        args:
-	          - train_$(TASK).py
-	          - --job-id=$(JOB_ID)
-	          - --timesteps=$(TIMESTEPS)
-	          - --output-dir=/tmp/output
-	        envFrom:
-	          - secretRef:
-	              name: fleetos-training
-	    - name: eval-task
-	      container:
-	        image: fleetos/training:latest
-	        command: [python]
-	        args:
-	          - evaluate_$(TASK).py
-	          - --model-path=/tmp/output/policy.zip
-	          - --output-dir=/tmp/eval
-	        envFrom:
-	          - secretRef:
-	              name: fleetos-training
-	EOF
+	@printf '%s\n' \
+		'apiVersion: argoproj.io/v1alpha1' \
+		'kind: Workflow' \
+		'metadata:' \
+		'  generateName: fleetos-$(TASK)-' \
+		'spec:' \
+		'  workflowTemplateRef:' \
+		'    name: fleetos-$(TASK)-training' \
+		'  arguments:' \
+		'    parameters:' \
+		'      - name: job-id' \
+		'        value: "$(JOB_ID)"' \
+		'      - name: timesteps' \
+		'        value: "$(TIMESTEPS)"' \
+		| kubectl create -n argo -f -
+
+# --- Kubernetes (single-node k3s in Colima — MLOps path, no ArgoCD) ---
+k3s-up:
+	scripts/k3s-setup.sh
+
+# Rebuild all platform + training images and restart the platform pods
+k3s-images:
+	scripts/k3s-setup.sh --images
+
+# Stops the VM; the cluster and the MinIO PVC survive `make k3s-up` again.
+k3s-down:
+	colima stop
+
+k3s-train: k8s-train
 
 k8s-status:
 	@echo "=== Namespaces ===" && kubectl get ns
