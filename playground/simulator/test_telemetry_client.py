@@ -58,6 +58,7 @@ sys.modules["google.protobuf.timestamp_pb2"].Timestamp = MagicMock
 for cls in [
     "TelemetryPacket", "RobotState", "Pose", "Vector3", "Quaternion",
     "JointState", "LidarScan", "LidarPoint", "VideoFrame", "StreamAck",
+    "PerformanceMetrics", "TrainingContext", "ObjectState",
 ]:
     setattr(sys.modules["proto.telemetry_pb2"], cls, MagicMock)
 

@@ -8,11 +8,11 @@ import (
 
 // Config holds configuration for the playground simulator.
 type Config struct {
-	GRPCPort          int
-	SimulationPort    int
-	RedisAddr         string
-	SimRobotCount     int
-	SimTickInterval   time.Duration
+	GRPCPort        int
+	SimulationPort  int
+	RedisAddr       string
+	SimRobotCount   int
+	SimTickInterval time.Duration
 }
 
 func Load() *Config {

@@ -12,10 +12,10 @@ import (
 
 // WebhookFanoutInput is the input for WebhookFanoutWorkflow.
 type WebhookFanoutInput struct {
-	EventType string             `json:"event_type"`
-	Body      []byte             `json:"body"`
-	Timestamp int64              `json:"timestamp"`
-	Hooks     []WebhookTarget    `json:"hooks"`
+	EventType string          `json:"event_type"`
+	Body      []byte          `json:"body"`
+	Timestamp int64           `json:"timestamp"`
+	Hooks     []WebhookTarget `json:"hooks"`
 }
 
 // WebhookTarget identifies a single webhook to deliver to.

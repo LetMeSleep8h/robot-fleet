@@ -79,10 +79,10 @@ func (m *mockRepo) ListRobotsByInferenceModel(_ context.Context, _ string) ([]*s
 func (m *mockRepo) Close() {}
 
 type mockCache struct {
-	states   map[string]*store.RobotHotState
-	counters map[string]int64
+	states    map[string]*store.RobotHotState
+	counters  map[string]int64
 	published []string
-	err      error
+	err       error
 }
 
 func newMockCache() *mockCache {
@@ -127,7 +127,7 @@ func (m *mockCache) GetCacheJSON(_ context.Context, key string) ([]byte, error) 
 }
 func (m *mockCache) CheckCommandDedup(_ context.Context, _ string) (int64, error) { return 0, nil }
 func (m *mockCache) SetCommandDedup(_ context.Context, _ string, _ int64) error   { return nil }
-func (m *mockCache) Close() {}
+func (m *mockCache) Close()                                                       {}
 
 type mockCommandProducer struct {
 	messages [][]byte

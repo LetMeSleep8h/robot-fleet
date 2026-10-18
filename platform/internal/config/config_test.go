@@ -82,3 +82,70 @@ func TestGetEnvInt(t *testing.T) {
 		t.Errorf("expected 99, got %d", v)
 	}
 }
+
+func TestLoad_MLOpsDefaults(t *testing.T) {
+	cfg := Load()
+	if cfg.ArgoServerURL != "" {
+		t.Errorf("training must be off unless ARGO_SERVER_URL is set, got %q", cfg.ArgoServerURL)
+	}
+	if cfg.ArgoNamespace != "argo" || cfg.ModelsBucket != "fleetos-models" {
+		t.Errorf("unexpected defaults: ns=%q bucket=%q", cfg.ArgoNamespace, cfg.ModelsBucket)
+	}
+	if cfg.MinEvalPassRate != 0.5 || cfg.ArgoInsecureSkipVerify {
+		t.Errorf("unexpected defaults: pass=%v insecure=%v", cfg.MinEvalPassRate, cfg.ArgoInsecureSkipVerify)
+	}
+}
+
+func TestLoad_MLOpsOverrides(t *testing.T) {
+	t.Setenv("ARGO_SERVER_URL", "https://argo-server.argo:2746")
+	t.Setenv("ARGO_NAMESPACE", "ml")
+	t.Setenv("ARGO_TOKEN", "tok")
+	t.Setenv("ARGO_INSECURE_SKIP_VERIFY", "true")
+	t.Setenv("MODELS_BUCKET", "models")
+	t.Setenv("MODEL_MIN_EVAL_PASS_RATE", "0.8")
+
+	cfg := Load()
+	if cfg.ArgoServerURL != "https://argo-server.argo:2746" || cfg.ArgoNamespace != "ml" || cfg.ArgoToken != "tok" ||
+		!cfg.ArgoInsecureSkipVerify || cfg.ModelsBucket != "models" || cfg.MinEvalPassRate != 0.8 {
+		t.Errorf("overrides not applied: %+v", cfg)
+	}
+}
+
+func TestLoad_InvalidPassRateFallsBack(t *testing.T) {
+	t.Setenv("MODEL_MIN_EVAL_PASS_RATE", "most")
+	if got := Load().MinEvalPassRate; got != 0.5 {
+		t.Errorf("MinEvalPassRate = %v, want default 0.5", got)
+	}
+}
+
+func TestLoad_KubeflowDefaults(t *testing.T) {
+	cfg := Load()
+	if cfg.KubeflowEnabled {
+		t.Error("kubeflow must be opt-in")
+	}
+	if cfg.KubeflowNamespace != "fleetos-training" || cfg.KubeflowRuntime != "fleetos-sb3" || cfg.TrainingImage != "fleetos/training:latest" {
+		t.Errorf("unexpected defaults: %+v", cfg)
+	}
+	if cfg.HPOAlgorithm != "tpe" || cfg.HPOMaxTrials != 4 || cfg.HPOParallelTrials != 2 || cfg.HPOTrialTimesteps != 20000 {
+		t.Errorf("unexpected HPO defaults: %+v", cfg)
+	}
+}
+
+func TestLoad_KubeflowOverrides(t *testing.T) {
+	t.Setenv("KUBEFLOW_ENABLED", "true")
+	t.Setenv("KUBEFLOW_NAMESPACE", "ml")
+	t.Setenv("KUBEFLOW_RUNTIME", "gpu-runtime")
+	t.Setenv("TRAINING_IMAGE", "registry/training:v2")
+	t.Setenv("HPO_ALGORITHM", "bayesianoptimization")
+	t.Setenv("HPO_MAX_TRIALS", "20")
+	t.Setenv("HPO_PARALLEL_TRIALS", "3")
+	t.Setenv("HPO_TRIAL_TIMESTEPS", "100000")
+
+	cfg := Load()
+	if !cfg.KubeflowEnabled || cfg.KubeflowNamespace != "ml" || cfg.KubeflowRuntime != "gpu-runtime" || cfg.TrainingImage != "registry/training:v2" {
+		t.Errorf("kubeflow overrides not applied: %+v", cfg)
+	}
+	if cfg.HPOAlgorithm != "bayesianoptimization" || cfg.HPOMaxTrials != 20 || cfg.HPOParallelTrials != 3 || cfg.HPOTrialTimesteps != 100000 {
+		t.Errorf("HPO overrides not applied: %+v", cfg)
+	}
+}

@@ -27,8 +27,8 @@ type AggregateUsageInput struct {
 
 // AggregateUsageOutput is the result of AggregateUsage.
 type AggregateUsageOutput struct {
-	TenantID string         `json:"tenant_id"`
-	Date     string         `json:"date"`
+	TenantID string           `json:"tenant_id"`
+	Date     string           `json:"date"`
 	Counts   map[string]int64 `json:"counts"`
 }
 
@@ -209,11 +209,11 @@ func (a *BillingActivities) UpdateInvoicePaymentStatus(ctx context.Context, inpu
 
 // RecordTierChangeInput is the input for RecordTierChange.
 type RecordTierChangeInput struct {
-	TenantID        string  `json:"tenant_id"`
-	FromTier        string  `json:"from_tier"`
-	ToTier          string  `json:"to_tier"`
+	TenantID        string    `json:"tenant_id"`
+	FromTier        string    `json:"from_tier"`
+	ToTier          string    `json:"to_tier"`
 	EffectiveAt     time.Time `json:"effective_at"`
-	ProrationAmount float64 `json:"proration_amount"`
+	ProrationAmount float64   `json:"proration_amount"`
 }
 
 // RecordTierChange updates the tenant's tier and records the change event.

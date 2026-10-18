@@ -1,6 +1,6 @@
 # FleetOS
 
-A distributed robot fleet management platform following the **Menlo OS architecture**: high-level reasoning happens in the platform (cloud); robots handle execution only. Robots connect via gRPC to send telemetry and receive commands. The platform runs inference, manages model lifecycle (staged → canary → deployed), and provides developer-facing REST/WebSocket APIs with auth, billing, and full-stack analytics.
+A distributed robot fleet management platform built on a **cloud-brain architecture**: high-level reasoning happens in the platform (cloud); robots handle execution only. Robots connect via gRPC to send telemetry and receive commands. The platform runs inference, manages model lifecycle (staged → canary → deployed), and provides developer-facing REST/WebSocket APIs with auth, billing, and full-stack analytics.
 
 ## Features
 
@@ -13,8 +13,8 @@ A distributed robot fleet management platform following the **Menlo OS architect
 - **Model Registry** -- Model lifecycle management (staged -> canary -> deployed -> archived) with S3 artifact storage, canary deployment via Temporal workflows
 - **Admin Console** -- React SPA at `/admin/` for tenant management, DB-backed API key lifecycle (create/revoke with SHA-256 hashing), billing overview
 - **Temporal Billing** -- Per-tenant BillingCycleWorkflow: 6h usage aggregation (Redis → Postgres), monthly invoice generation, payment processing with dunning retries, tier change signals
-- **Canary Model Deployment** -- Progressive rollout (5% → 25% → 50% → 100%) with deterministic robot selection (fnv32 hash), live success_rate comparison from robot uptime metrics, automatic rollback
-- **Per-Robot Model Assignment** -- Each robot tracks its `inference_model_id`; inference lookups use the assigned model; canary deployments progressively update assignments
+- **Evaluation Gate + Canary Deployment** -- Deploys are refused unless the model's eval pass rate ≥ 0.5 and its reward is within 5% of the deployed model; accepted deploys roll out progressively (assign 5% → observe → 25% → 50% → 100%) with deterministic robot selection (fnv32 hash), live success_rate comparison from robot uptime metrics, automatic rollback
+- **Per-Robot Model Assignment** -- Each robot tracks its `inference_model_id`; API inference requests are pinned to that model's artifact (inference keeps an LRU cache of policies), so canary robots are served by the canary policy. The simulator calls inference directly and always gets the active model
 - **Performance Metrics Feedback** -- Simulator computes Humanoid-v4 reward (forward velocity + alive bonus - control cost), tracks falls/uptime, streams metrics via protobuf → processor aggregates into model registry `success_rate`
 - **Kafka Event Pipeline** -- Commands, acks, and deployment events all flow through Kafka topics (no Redis pub/sub for events); Redis is cache + rate limiter only
 - **Temporal Workflow Orchestration** -- Command dispatch, model deployment, agent deployment, billing cycles, and webhook delivery all run as durable Temporal workflows with full visibility via Temporal UI
@@ -150,7 +150,10 @@ open http://localhost:8123   # ClickHouse (direct SQL)
 | `POST` | `/api/v1/inference` | AI inference (uses robot's assigned model) |
 | `GET` | `/api/v1/fleet/metrics` | Aggregated fleet stats |
 | `POST` | `/api/v1/models` | Register model (staged) |
-| `POST` | `/api/v1/models/{id}/deploy` | Deploy model (canary rollout) |
+| `POST` | `/api/v1/models/{id}/deploy` | Gate + start canary → `202 {workflow_id}`; `422` gate rejection, `409` not staged, `503` without Temporal |
+| `POST` | `/api/v1/training/pipelines` | Start training pipeline (`backend: argo\|kubeflow`, `use_katib`, `auto_deploy`) → `202` |
+| `GET` | `/api/v1/training/pipelines/{id}` | Pipeline status + result |
+| `POST` | `/api/v1/locomotion/jobs` | Submit a single Argo training job (`503` if training not configured) |
 | `GET` | `/api/v1/billing/subscription` | Current subscription |
 | `PUT` | `/api/v1/billing/subscription/tier` | Change tier (signals workflow) |
 | `GET` | `/api/v1/billing/invoices` | Invoice history |
@@ -229,7 +232,7 @@ All event routing goes through Kafka. Redis is used only for cache (hot state, r
 
 ## AI Inference Pipeline
 
-The inference service runs as a platform service (not on the robot), following the Menlo OS pattern where robots only execute — all reasoning is cloud-side.
+The inference service runs as a platform service (not on the robot); robots only execute — all reasoning is cloud-side.
 
 ```
 Instruction ("wave hello") + Optional observation (376-dim MuJoCo state)
@@ -251,39 +254,42 @@ Processor starts Temporal workflow → Redis → Ingestion → gRPC StreamComman
 
 Watch inference: `docker logs -f platform-inference-1`
 
-## ML Training Pipeline (Temporal + Kubeflow)
+## ML Training Pipeline (Temporal + Argo / Kubeflow)
 
-Training is orchestrated by Temporal and executed by Kubeflow on dedicated GPU nodes. The pipeline supports multiple learning paradigms: reinforcement learning (online and offline), supervised behavior cloning, and unsupervised representation learning.
+Training is orchestrated by Temporal and executed either by Argo Workflows (default) or by Kubeflow Trainer, optionally after a Katib hyperparameter search. Start a run with `POST /api/v1/training/pipelines` and poll `GET /api/v1/training/pipelines/{id}`. Everything below has been verified on local k3s (CPU only).
 
 ```
 Temporal TrainingPipelineWorkflow (fleetos-training queue)
   │
-  ├─ CollectExperienceStats
-  │     Query S3 for robot experience batches
-  │     (obs, action, reward, done) NDJSON from simulator
+  ├─ [use_katib] RunHyperparameterSearch ─► Katib Experiment (namespace fleetos-training)
+  │     TPE, 4 trials × 2 parallel, 20k timesteps each (HPO_* / kubeflow.hpo values)
+  │     search: learning_rate [1e-4, 3e-3], n_steps {512,1024,2048}, ent_coef [0, 0.02]
+  │     objective: eval_mean_reward (StdOut collector)     → best params
   │
-  ├─ SubmitKubeflowRun ──────────► Kubeflow (kubeflow namespace)
-  │     │  Task types: locomotion, reach, grasp, offline, bc, autoencoder
-  │     │                            ├─ Katib HPO (Bayesian, 20 trials, 3 parallel)
-  │     │                            ├─ PyTorchJob on g5.2xlarge GPU nodes
-  │     │                            │    Custom Gymnasium envs (lab_room.xml physics)
-  │     │                            │    7x sub-stepping, unified 86-dim observations
-  │     │                            └─ Artifacts → S3 (policy.zip, metrics.json)
-  │     └─ Waits for completion
+  ├─ SubmitTrainingRun (heartbeats; retries resume the same run)
+  │     backend=argo     ─► Argo WorkflowTemplate fleetos-{locomotion,reach}-training
+  │     backend=kubeflow ─► Kubeflow Trainer TrainJobs on ClusterTrainingRuntime fleetos-sb3
+  │                         (train TrainJob → evaluate TrainJob)
+  │     Task types: locomotion, reach. Artifacts → S3: training/<job>/policy.zip,
+  │     evaluations/<job>/eval_results.json
   │
-  ├─ EvaluateTrainedModel
-  │     Compare vs baseline: must be ≥ 95% of current success_rate
-  │     Gate: reject if degraded
+  ├─ EvaluateTrainedModel — reads this job's eval results; gate (internal/modelgate):
+  │     eval pass rate ≥ MODEL_MIN_EVAL_PASS_RATE (0.5) and reward ≤ 5% below deployed model
+  │     → rejected models stop here (phase "gated", with the reason)
   │
-  ├─ RegisterTrainedModel → model registry (staged)
+  ├─ RegisterTrainedModel → registry (staged) with eval metrics, backend, hyperparameters
   │
   └─ Auto-deploy (if enabled)
-        └─ Child ModelDeploymentWorkflow (canary 5% → 25% → 50% → 100%)
+        └─ Child ModelDeploymentWorkflow on the deployment queue
+           (assign 5% → observe → 25% → 50% → 100%, rollback on failure)
 ```
 
 **Separation of concerns:**
-- **Temporal** = orchestration brain (decides what, when, handles failures, gates, rollback)
-- **Kubeflow** = ML compute engine (GPU training, hyperparameter tuning, distributed jobs)
+- **Temporal** = orchestration (decides what and when, handles failures, gates, rollback)
+- **Argo / Kubeflow Trainer** = training compute; **Katib** = hyperparameter search
+- The worker talks to the Argo Server REST API (`internal/argo`) and to the Kubernetes API (`internal/kube`, `internal/kubeflow`) with a namespaced Role, so there's no kubectl in containers
+
+**Not supported yet:** fine-tuning (`base_model`), training from collected experience (`CollectExperienceStats` returns a fixed estimate), Katib for `reach`, GPU training (the AWS GPU design is in Terraform but not verified).
 
 ### Training Algorithms
 
@@ -368,11 +374,11 @@ python train_autoencoder.py --job-id ae-001 --experience-prefix experience/ \
 
 | Resource | Spec | Purpose |
 |----------|------|---------|
-| GPU node group | g5.2xlarge, 0-8, scale-from-zero | Kubeflow training jobs |
-| Kubeflow namespace | Istio-injected | ML workloads isolation |
+| GPU node group | g5.2xlarge, 0-8, scale-from-zero (designed, not verified) | Training jobs on AWS |
+| Kubeflow namespace | Created by Terraform; Trainer/Katib must be installed separately | ML workloads isolation |
 | IAM role (IRSA) | S3 read/write on models + training-data | Secure artifact access |
 | S3 lifecycle | experience/ → Glacier 30d → delete 180d | Cost management |
-| Katib | Bayesian optimization, 20 trials × 3 parallel | Hyperparameter search |
+| Katib (Helm `kubeflow.hpo`) | TPE by default, 4 trials × 2 parallel (local budget) | Hyperparameter search |
 
 ## Testing
 

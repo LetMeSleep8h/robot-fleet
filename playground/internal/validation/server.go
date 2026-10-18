@@ -283,8 +283,8 @@ func (s *Server) runScenario(sc scenarioDef, envelope map[string]any) *pb.Scenar
 		DurationSeconds: duration,
 		Violations:      violations,
 		Metrics: map[string]float64{
-			"final_battery":  robot.Battery,
-			"total_steps":    float64(ScenarioStepsPerScenario),
+			"final_battery":   robot.Battery,
+			"total_steps":     float64(ScenarioStepsPerScenario),
 			"violation_count": float64(len(violations)),
 		},
 	}
@@ -298,7 +298,7 @@ func checkSafetyViolations(robot *simulator.Robot, envelope map[string]any) []*p
 	if maxVel, ok := envelope["max_velocity"]; ok {
 		limit, _ := toFloat64(maxVel)
 		if limit > 0 {
-			velocity := math.Sqrt(robot.PosX*robot.PosX + robot.PosY*robot.PosY) * 0.01 // approximate velocity
+			velocity := math.Sqrt(robot.PosX*robot.PosX+robot.PosY*robot.PosY) * 0.01 // approximate velocity
 			if velocity > limit {
 				violations = append(violations, &pb.SafetyViolation{
 					Type:      "velocity_exceeded",

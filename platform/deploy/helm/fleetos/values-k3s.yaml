@@ -1,0 +1,31 @@
+# values-k3s.yaml — Layered on top of values-local.yaml for a single-node k3s
+# cluster (e.g. `colima start --kubernetes`). k3s shares the host Docker
+# runtime, so locally built fleetos/* images are used directly (no kind load).
+#
+#   helm upgrade --install fleetos-platform . -n fleetos --create-namespace \
+#     -f values-local.yaml -f values-k3s.yaml
+#
+# Or just: make k3s-up (scripts/k3s-setup.sh).
+#
+# Focus is the MLOps path (training → MinIO → registry → canary → inference),
+# so the playground and dashboards are off to save memory.
+
+# Keep trained models across MinIO restarts (k3s ships the local-path provisioner).
+minioStandalone:
+  persistence:
+    enabled: true
+    size: 5Gi
+
+simulator:
+  enabled: false
+web:
+  enabled: false
+grafana:
+  enabled: false
+prometheus:
+  enabled: false
+
+# Kubeflow Trainer v2 + Katib are installed by scripts/k3s-setup.sh.
+kubeflow:
+  enabled: true
+  imagePullPolicy: Never  # training image is built into the k3s Docker runtime

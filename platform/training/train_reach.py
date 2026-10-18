@@ -243,7 +243,9 @@ def _upload_to_s3(args, output_dir: Path):
                 client.fput_object(args.s3_bucket, key, str(f))
                 print(f"[s3] Uploaded {key}")
     except Exception as e:
+        # Fatal: downstream eval/registry need training/<job>/policy.zip.
         print(f"[s3] Upload failed: {e}")
+        raise
 
 
 def _notify_callback(url: str, results: dict):

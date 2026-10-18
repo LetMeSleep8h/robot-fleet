@@ -11,8 +11,10 @@ import (
 
 // Sentinel errors for service-level error handling.
 var (
-	ErrNotFound    = errors.New("not found")
-	ErrUnavailable = errors.New("service unavailable")
+	ErrNotFound     = store.ErrNotFound
+	ErrUnavailable  = errors.New("service unavailable")
+	ErrConflict     = errors.New("conflict with current state")
+	ErrInvalidInput = errors.New("invalid input")
 )
 
 // RobotService defines the business logic interface for the FleetOS API.

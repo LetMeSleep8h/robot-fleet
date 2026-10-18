@@ -29,6 +29,16 @@ metadata:
     app: minio
 spec:
   replicas: 1
+  {{- if (.Values.minioStandalone.persistence).enabled }}
+  # RWO volume can't be mounted by old and new pod at once: stop the old pod
+  # first. (Same effect as Recreate, but stays upgradeable from the emptyDir
+  # setup — switching type to Recreate is rejected under server-side apply.)
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 0
+      maxUnavailable: 1
+  {{- end }}
   selector:
     matchLabels:
       app: minio
@@ -49,6 +59,12 @@ spec:
               value: {{ .Values.minioStandalone.rootUser }}
             - name: MINIO_ROOT_PASSWORD
               value: {{ .Values.minioStandalone.rootPassword }}
+          readinessProbe:
+            httpGet:
+              path: /minio/health/ready
+              port: 9000
+            initialDelaySeconds: 3
+            periodSeconds: 5
           resources:
             requests:
               cpu: 25m
@@ -56,20 +72,73 @@ spec:
             limits:
               cpu: 250m
               memory: 256Mi
-      initContainers:
-        - name: create-buckets
-          image: busybox:1.36
-          command:
-            - sh
-            - -c
-            - |
-              {{- range (split "," .Values.minioStandalone.buckets) }}
-              mkdir -p /data/{{ . }}
-              {{- end }}
           volumeMounts:
             - name: data
               mountPath: /data
       volumes:
         - name: data
+          {{- if (.Values.minioStandalone.persistence).enabled }}
+          persistentVolumeClaim:
+            claimName: {{ .Release.Name }}-minio-data
+          {{- else }}
           emptyDir: {}
+          {{- end }}
+{{- if (.Values.minioStandalone.persistence).enabled }}
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ .Release.Name }}-minio-data
+  labels:
+    app: minio
+spec:
+  accessModes: ["ReadWriteOnce"]
+  {{- with .Values.minioStandalone.persistence.storageClass }}
+  storageClassName: {{ . }}
+  {{- end }}
+  resources:
+    requests:
+      storage: {{ .Values.minioStandalone.persistence.size | default "5Gi" }}
+{{- end }}
+---
+# Buckets must be created through the S3 API — modern MinIO no longer treats
+# plain directories under /data as buckets. The mc image is distroless (no
+# shell), so the alias comes from MC_HOST_<alias> and retries while MinIO starts
+# come from the Job's backoffLimit. `--ignore-existing` keeps it idempotent.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ .Release.Name }}-minio-buckets
+  labels:
+    app: minio-buckets
+  annotations:
+    "helm.sh/hook": post-install,post-upgrade
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+spec:
+  backoffLimit: 10
+  template:
+    metadata:
+      labels:
+        app: minio-buckets
+    spec:
+      restartPolicy: OnFailure
+      containers:
+        - name: mc
+          image: {{ .Values.minioStandalone.mcImage | default "cgr.dev/chainguard/minio-client:latest" }}
+          args:
+            - mb
+            - --ignore-existing
+            {{- range (split "," .Values.minioStandalone.buckets) }}
+            - fleetos/{{ . }}
+            {{- end }}
+          env:
+            - name: MC_HOST_fleetos
+              value: "http://{{ .Values.minioStandalone.rootUser }}:{{ .Values.minioStandalone.rootPassword }}@{{ .Release.Name }}-minio:9000"
+          resources:
+            requests:
+              cpu: 10m
+              memory: 32Mi
+            limits:
+              cpu: 100m
+              memory: 128Mi
 {{- end }}

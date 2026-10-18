@@ -94,13 +94,13 @@ kind: Service
 metadata:
   name: {{ .Release.Name }}-prometheus
 spec:
-  type: {{ .Values.prometheus.service.type | default "ClusterIP" }}
+  type: {{ (.Values.prometheus.service).type | default "ClusterIP" }}
   ports:
     - port: 9090
       targetPort: 9090
       name: http
-      {{- if .Values.prometheus.service.nodePort }}
-      nodePort: {{ .Values.prometheus.service.nodePort }}
+      {{- if (.Values.prometheus.service).nodePort }}
+      nodePort: {{ (.Values.prometheus.service).nodePort }}
       {{- end }}
   selector:
     app: prometheus

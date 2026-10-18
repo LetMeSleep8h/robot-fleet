@@ -20,11 +20,11 @@ import (
 // TelemetryHandler implements the gRPC TelemetryService.
 type TelemetryHandler struct {
 	pb.UnimplementedTelemetryServiceServer
-	producer        *KafkaProducer
-	redisClient     *redis.Client
-	cmdDispatcher   *CommandDispatcher // routes Kafka commands to per-robot channels
-	ackProducer     *KafkaProducer     // publishes command acks back to Temporal bridge
-	packetCount     atomic.Int64
+	producer      *KafkaProducer
+	redisClient   *redis.Client
+	cmdDispatcher *CommandDispatcher // routes Kafka commands to per-robot channels
+	ackProducer   *KafkaProducer     // publishes command acks back to Temporal bridge
+	packetCount   atomic.Int64
 }
 
 func NewTelemetryHandler(producer *KafkaProducer, redisClient *redis.Client) *TelemetryHandler {

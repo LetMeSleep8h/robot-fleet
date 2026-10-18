@@ -46,8 +46,8 @@ def download_model(args) -> str:
             local_dir = Path(args.output_dir) / "model"
             local_dir.mkdir(parents=True, exist_ok=True)
 
-            # Strip s3:// prefix
-            key = args.model_path.replace("s3://fleetos-models/", "")
+            # Strip s3://<bucket>/ prefix
+            key = args.model_path.replace(f"s3://{args.s3_bucket}/", "")
             local_path = str(local_dir / "policy.zip")
             client.fget_object(args.s3_bucket, key, local_path)
 
@@ -123,6 +123,12 @@ def evaluate(args):
         "eval_duration_seconds": round(eval_duration, 1),
         "scenario_results": scenario_results,
     }
+    # Summary map for the platform's eval callback (EvalCallbackPayload.results).
+    results["results"] = {
+        "mean_reward": results["mean_reward"],
+        "std_reward": results["std_reward"],
+        "mean_episode_length": results["mean_episode_length"],
+    }
 
     with open(str(output_dir / "eval_results.json"), "w") as f:
         json.dump(results, f, indent=2)
@@ -184,11 +190,15 @@ def upload_results(args, output_dir: Path):
         )
         prefix = f"evaluations/{args.eval_id}"
         for fpath in output_dir.iterdir():
+            if not fpath.is_file():
+                continue  # skip the downloaded model/ directory
             key = f"{prefix}/{fpath.name}"
             client.fput_object(args.s3_bucket, key, str(fpath))
             print(f"[s3] Uploaded {key}")
     except Exception as e:
-        print(f"[s3] Upload failed (non-fatal): {e}")
+        # Fatal: the platform's evaluation gate reads eval_results.json from S3.
+        print(f"[s3] Upload failed: {e}")
+        raise
 
 
 def notify_callback(url: str, results: dict):

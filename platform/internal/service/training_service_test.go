@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"testing"
 	"time"
@@ -82,7 +83,7 @@ func (m *mockTrainingRepo) UpdateTrainingJobMetrics(_ context.Context, id string
 func (m *mockTrainingRepo) UpdateTrainingJobCompleted(_ context.Context, id, status, artifactURL, errorMsg string) error {
 	j, ok := m.jobs[id]
 	if !ok {
-		return fmt.Errorf("not found")
+		return store.ErrNotFound
 	}
 	j.Status = status
 	j.ArtifactURL = artifactURL
@@ -128,7 +129,7 @@ func (m *mockTrainingRepo) ListTrainingEvals(_ context.Context, tenantID, jobID 
 func (m *mockTrainingRepo) UpdateTrainingEvalCompleted(_ context.Context, id string, passed, total int, passRate float64, results map[string]any, errorMsg string) error {
 	e, ok := m.evals[id]
 	if !ok {
-		return fmt.Errorf("not found")
+		return store.ErrNotFound
 	}
 	e.ScenariosPassed = passed
 	e.ScenariosTotal = total
@@ -158,7 +159,7 @@ func (m *mockSubmitter) SubmitTrainingJob(_ context.Context, job *store.Training
 	return nil
 }
 
-func (m *mockSubmitter) SubmitEvalJob(_ context.Context, eval *store.TrainingEvalRecord, _ string) error {
+func (m *mockSubmitter) SubmitEvalJob(_ context.Context, eval *store.TrainingEvalRecord, _ *store.TrainingJobRecord) error {
 	if m.err != nil {
 		return m.err
 	}
@@ -189,14 +190,47 @@ func TestSubmitTrainingJob(t *testing.T) {
 	if job.Algorithm != "PPO" {
 		t.Errorf("expected PPO default, got %s", job.Algorithm)
 	}
-	if job.Environment != "Humanoid-v4" {
-		t.Errorf("expected Humanoid-v4 default, got %s", job.Environment)
+	if job.Environment != "FleetOS-Humanoid-v2" {
+		t.Errorf("expected FleetOS-Humanoid-v2 default (the env inference serves), got %s", job.Environment)
 	}
 	if job.Timesteps != 500_000 {
 		t.Errorf("expected 500000, got %d", job.Timesteps)
 	}
 	if len(submitter.submitted) != 1 {
 		t.Fatalf("expected 1 submission, got %d", len(submitter.submitted))
+	}
+	// The training workflow evaluates the model under the job's ID, so the
+	// eval record must exist for its callback to land.
+	eval, ok := repo.evals[job.ID]
+	if !ok || eval.JobID != job.ID || eval.Status != TrainingStatusQueued {
+		t.Errorf("expected queued eval record keyed by job ID, got %+v", eval)
+	}
+}
+
+func TestSubmitTrainingJob_NoSubmitterIsUnavailable(t *testing.T) {
+	repo := newMockTrainingRepo()
+	svc := NewTrainingService(repo, nil)
+
+	_, err := svc.SubmitJob(context.Background(), "tenant-1", "user@test.com", SubmitTrainingJobRequest{})
+	if !errors.Is(err, ErrUnavailable) {
+		t.Fatalf("expected ErrUnavailable, got %v", err)
+	}
+	if len(repo.jobs) != 0 {
+		t.Error("no job record should claim to run when training is not configured")
+	}
+}
+
+func TestSubmitTrainingJob_UnsupportedAlgorithm(t *testing.T) {
+	repo := newMockTrainingRepo()
+	submitter := &mockSubmitter{}
+	svc := NewTrainingService(repo, submitter)
+
+	_, err := svc.SubmitJob(context.Background(), "tenant-1", "u", SubmitTrainingJobRequest{Algorithm: "DQN"})
+	if !errors.Is(err, ErrInvalidInput) {
+		t.Fatalf("expected ErrInvalidInput, got %v", err)
+	}
+	if len(submitter.submitted) != 0 || len(repo.jobs) != 0 {
+		t.Error("unsupported algorithm must not create or submit a job")
 	}
 }
 
@@ -219,7 +253,7 @@ func TestSubmitTrainingJob_SubmissionFailure(t *testing.T) {
 
 func TestGetJob_TenantIsolation(t *testing.T) {
 	repo := newMockTrainingRepo()
-	svc := NewTrainingService(repo, &NoOpSubmitter{})
+	svc := NewTrainingService(repo, &mockSubmitter{})
 
 	job, _ := svc.SubmitJob(context.Background(), "tenant-1", "user@test.com", SubmitTrainingJobRequest{})
 
@@ -263,6 +297,9 @@ func TestSubmitEval(t *testing.T) {
 	if eval.ScenariosTotal != 50 {
 		t.Errorf("expected 50 scenarios, got %d", eval.ScenariosTotal)
 	}
+	if eval.ID == job.ID {
+		t.Error("an extra evaluation needs its own ID, distinct from the job's built-in one")
+	}
 	if len(submitter.submitted) != 2 { // 1 train + 1 eval
 		t.Errorf("expected 2 submissions, got %d", len(submitter.submitted))
 	}
@@ -273,13 +310,13 @@ func TestSubmitEval_JobNotCompleted(t *testing.T) {
 	svc := NewTrainingService(repo, &mockSubmitter{})
 
 	job, _ := svc.SubmitJob(context.Background(), "tenant-1", "user@test.com", SubmitTrainingJobRequest{})
-	// Job is still "queued" (NoOpSubmitter doesn't change status)
+	// Job is still running
 
 	_, err := svc.SubmitEval(context.Background(), "tenant-1", SubmitEvalRequest{
 		JobID: job.ID,
 	})
-	if err == nil {
-		t.Fatal("should reject eval for non-completed job")
+	if !errors.Is(err, ErrConflict) {
+		t.Fatalf("should reject eval for non-completed job with ErrConflict, got %v", err)
 	}
 }
 
@@ -340,5 +377,31 @@ func TestEvalCallback(t *testing.T) {
 	}
 	if updated.ScenariosPassed != 94 {
 		t.Errorf("expected 94, got %d", updated.ScenariosPassed)
+	}
+}
+
+func TestCallbacks_UnknownIDsAreNotFound(t *testing.T) {
+	svc := NewTrainingService(newMockTrainingRepo(), &mockSubmitter{})
+
+	if err := svc.HandleTrainingCallback(context.Background(), TrainingCallbackPayload{JobID: "loco-k3s-001", Status: "completed"}); !errors.Is(err, ErrNotFound) {
+		t.Errorf("training callback: expected ErrNotFound, got %v", err)
+	}
+	if err := svc.HandleEvalCallback(context.Background(), EvalCallbackPayload{EvalID: "loco-k3s-001", Status: "completed"}); !errors.Is(err, ErrNotFound) {
+		t.Errorf("eval callback: expected ErrNotFound, got %v", err)
+	}
+}
+
+func TestTrainingCallback_RecordsTopLevelEvalReward(t *testing.T) {
+	repo := newMockTrainingRepo()
+	svc := NewTrainingService(repo, &mockSubmitter{})
+	job, _ := svc.SubmitJob(context.Background(), "tenant-1", "u", SubmitTrainingJobRequest{})
+
+	if err := svc.HandleTrainingCallback(context.Background(), TrainingCallbackPayload{
+		JobID: job.ID, Status: "completed", ArtifactURL: "training/" + job.ID + "/policy.zip", EvalMeanReward: 3.5,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if got := repo.jobs[job.ID].Metrics["eval_mean_reward"]; got != 3.5 {
+		t.Errorf("eval_mean_reward = %v, want 3.5", got)
 	}
 }

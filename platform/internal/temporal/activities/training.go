@@ -3,19 +3,85 @@ package activities
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
-	"net/http"
+	"strconv"
 	"time"
 
+	"go.temporal.io/sdk/activity"
+	"go.temporal.io/sdk/temporal"
+
+	"github.com/dimuthu/robot-fleet/internal/argo"
+	"github.com/dimuthu/robot-fleet/internal/modelgate"
 	"github.com/dimuthu/robot-fleet/internal/store"
 )
 
+// Training run polling.
+const (
+	DefaultPollInterval      = 15 * time.Second
+	MaxConsecutivePollErrors = 10
+)
+
+// LabelJobID tags every submitted Argo workflow with its FleetOS job ID.
+const LabelJobID = "fleetos.io/job-id"
+
+// Non-retryable error types surfaced to the training pipeline workflow.
+const (
+	ErrTypeTrainingNotConfigured = "TrainingNotConfigured"
+	ErrTypeUnsupportedTraining   = "UnsupportedTraining"
+	ErrTypeTrainingRunFailed     = "TrainingRunFailed"
+)
+
+// trainingTemplates maps a task type to its Argo WorkflowTemplate. Each
+// template trains, uploads training/<job-id>/policy.zip and then evaluates it,
+// uploading evaluations/<job-id>/eval_results.json.
+var trainingTemplates = map[string]string{
+	"locomotion": "fleetos-locomotion-training",
+	"reach":      "fleetos-reach-training",
+}
+
+// templatesWithEnvParam lists templates that accept an env-id parameter.
+var templatesWithEnvParam = map[string]bool{"fleetos-locomotion-training": true}
+
+// WorkflowRunner submits and tracks Argo workflows (implemented by *argo.Client).
+type WorkflowRunner interface {
+	SubmitTemplate(ctx context.Context, template string, params, labels map[string]string) (string, error)
+	GetWorkflowStatus(ctx context.Context, name string) (argo.Status, error)
+}
+
+// ArtifactReader reads training artifacts from the models bucket.
+type ArtifactReader interface {
+	Get(ctx context.Context, key string) ([]byte, error)
+}
+
+// Training backends.
+const (
+	BackendArgo     = "argo"     // Argo WorkflowTemplate (train + evaluate); the default
+	BackendKubeflow = "kubeflow" // Kubeflow Trainer TrainJobs (train, then evaluate)
+)
+
 // TrainingActivities holds dependencies for ML training pipeline activities.
+// A nil Runner/Kubeflow means that backend is not configured: runs fail
+// instead of faking success.
 type TrainingActivities struct {
-	Models    store.ModelRepository
-	Robots    store.RobotRepository
-	Submitter *ArgoSubmitter
+	Models       store.ModelRepository
+	Robots       store.RobotRepository
+	Runner       WorkflowRunner
+	Kubeflow     KubeflowRunner
+	HPO          HPOSettings
+	ModelsBucket string // bucket holding training artifacts (for eval model paths)
+	Artifacts    ArtifactReader
+	Gate         modelgate.Policy
+	PollInterval time.Duration
+}
+
+// ModelArtifactKey is where a training job uploads its policy.
+func ModelArtifactKey(jobID string) string { return fmt.Sprintf("training/%s/policy.zip", jobID) }
+
+// EvalResultsKey is where a training job's evaluation step uploads its results.
+func EvalResultsKey(jobID string) string {
+	return fmt.Sprintf("evaluations/%s/eval_results.json", jobID)
 }
 
 // CollectExperienceInput is the input for CollectExperienceStats.
@@ -31,154 +97,234 @@ type CollectExperienceOutput struct {
 }
 
 // CollectExperienceStats checks how much experience data is available in S3.
-// In production this would query S3 ListObjects; here we return a placeholder
-// since the Temporal workflow uses this to decide whether to include --from-experience.
+// Placeholder: returns a fixed estimate. The training templates cannot consume
+// experience data yet, so SubmitTrainingRun rejects runs that ask for it.
 func (a *TrainingActivities) CollectExperienceStats(ctx context.Context, input CollectExperienceInput) (*CollectExperienceOutput, error) {
 	slog.Info("checking experience data", "bucket", input.S3Bucket, "prefix", input.Prefix)
-	// Placeholder — real implementation queries S3 ListObjects and counts NDJSON lines
 	return &CollectExperienceOutput{
-		TransitionCount: 5000, // estimated from batch count
+		TransitionCount: 5000,
 		DateRange:       time.Now().AddDate(0, 0, -7).Format("2006-01-02") + " to " + time.Now().Format("2006-01-02"),
 	}, nil
 }
 
-// SubmitKubeflowRunInput is the input for SubmitKubeflowRun.
-type SubmitKubeflowRunInput struct {
-	JobID          string `json:"job_id"`
-	Timesteps      int    `json:"timesteps"`
-	EnvID          string `json:"env_id"`
-	BaseModel      string `json:"base_model"`      // S3 key for fine-tuning, empty = from scratch
-	FromExperience string `json:"from_experience"` // S3 prefix for experience data
-	UseKatib       bool   `json:"use_katib"`       // use HPO via Katib
-	TaskType       string `json:"task_type"`        // "locomotion" or "reach"
-	Algorithm      string `json:"algorithm"`        // "ppo" or "sac"
+// SubmitTrainingRunInput is the input for SubmitTrainingRun.
+type SubmitTrainingRunInput struct {
+	JobID           string            `json:"job_id"`
+	Timesteps       int               `json:"timesteps"`
+	EnvID           string            `json:"env_id"`
+	BaseModel       string            `json:"base_model"`      // S3 key for fine-tuning (not supported yet)
+	FromExperience  string            `json:"from_experience"` // S3 prefix for experience data (not supported yet)
+	TaskType        string            `json:"task_type"`       // "locomotion" or "reach"
+	Algorithm       string            `json:"algorithm"`
+	Backend         string            `json:"backend"`                   // BackendArgo (default) or BackendKubeflow
+	Hyperparameters map[string]string `json:"hyperparameters,omitempty"` // e.g. Katib's best trial (kubeflow backend)
 }
 
-// SubmitKubeflowRunOutput is the result of submitting a training run.
-type SubmitKubeflowRunOutput struct {
-	RunID     string `json:"run_id"`
-	Status    string `json:"status"` // "submitted", "running", "completed", "failed"
+// SubmitTrainingRunOutput is the result of a completed training run.
+type SubmitTrainingRunOutput struct {
+	RunID     string `json:"run_id"` // Argo workflow name
+	Status    string `json:"status"` // final Argo phase
 	ModelPath string `json:"model_path"`
 }
 
-// SubmitKubeflowRun submits a training job via Argo Workflows (if configured)
-// or falls back to stub behavior for local development.
-func (a *TrainingActivities) SubmitKubeflowRun(ctx context.Context, input SubmitKubeflowRunInput) (*SubmitKubeflowRunOutput, error) {
-	slog.Info("submitting training run",
-		"job_id", input.JobID,
-		"timesteps", input.Timesteps,
-		"env_id", input.EnvID,
-		"task_type", input.TaskType,
-		"algorithm", input.Algorithm,
-		"base_model", input.BaseModel,
-		"katib", input.UseKatib,
-	)
+// SubmitTrainingRun submits the task's Argo WorkflowTemplate and blocks until
+// the workflow finishes, heartbeating the workflow name so a retried attempt
+// resumes polling the same run instead of submitting a duplicate.
+func (a *TrainingActivities) SubmitTrainingRun(ctx context.Context, input SubmitTrainingRunInput) (*SubmitTrainingRunOutput, error) {
+	switch input.Backend {
+	case "", BackendArgo:
+		return a.submitArgoRun(ctx, input)
+	case BackendKubeflow:
+		return a.submitKubeflowRun(ctx, input)
+	default:
+		return nil, temporal.NewNonRetryableApplicationError(
+			fmt.Sprintf("unknown training backend %q (supported: argo, kubeflow)", input.Backend), ErrTypeUnsupportedTraining, nil)
+	}
+}
 
-	artifactURL := fmt.Sprintf("training/%s/policy.zip", input.JobID)
-
-	// Use ArgoSubmitter if configured, otherwise fall back to stub
-	if a.Submitter != nil {
-		taskType := input.TaskType
-		if taskType == "" {
-			taskType = "locomotion"
-		}
-
-		workflowName, err := a.Submitter.SubmitTraining(ctx, TrainingRunInput{
-			JobID:     input.JobID,
-			TaskType:  taskType,
-			Timesteps: input.Timesteps,
-		})
-		if err != nil {
-			return nil, fmt.Errorf("submit training run: %w", err)
-		}
-
-		result, err := a.Submitter.WaitForCompletion(ctx, workflowName)
-		if err != nil {
-			return nil, fmt.Errorf("training run failed: %w", err)
-		}
-
-		if result.ModelPath != "" {
-			artifactURL = result.ModelPath
-		}
-
-		return &SubmitKubeflowRunOutput{
-			RunID:     workflowName,
-			Status:    "completed",
-			ModelPath: artifactURL,
-		}, nil
+func (a *TrainingActivities) submitArgoRun(ctx context.Context, input SubmitTrainingRunInput) (*SubmitTrainingRunOutput, error) {
+	if a.Runner == nil {
+		return nil, temporal.NewNonRetryableApplicationError(
+			"training runner not configured (set ARGO_SERVER_URL)", ErrTypeTrainingNotConfigured, nil)
+	}
+	template, err := validateTrainingRun(input)
+	if err != nil {
+		return nil, err
 	}
 
-	// Stub mode: return the expected artifact URL without running actual training
-	slog.Info("argo submitter not configured, using stub mode", "job_id", input.JobID)
-	return &SubmitKubeflowRunOutput{
-		RunID:     input.JobID,
-		Status:    "submitted",
-		ModelPath: artifactURL,
-	}, nil
+	var name string
+	if activity.HasHeartbeatDetails(ctx) && activity.GetHeartbeatDetails(ctx, &name) == nil && name != "" {
+		slog.Info("resuming training run", "job_id", input.JobID, "workflow", name)
+	} else {
+		params := map[string]string{"job-id": input.JobID}
+		if input.Timesteps > 0 {
+			params["timesteps"] = strconv.Itoa(input.Timesteps)
+		}
+		if input.EnvID != "" && templatesWithEnvParam[template] {
+			params["env-id"] = input.EnvID
+		}
+		name, err = a.Runner.SubmitTemplate(ctx, template, params, map[string]string{LabelJobID: input.JobID})
+		if err != nil {
+			return nil, fmt.Errorf("submit training run %s: %w", input.JobID, err)
+		}
+		slog.Info("training run submitted", "job_id", input.JobID, "workflow", name, "template", template)
+	}
+	activity.RecordHeartbeat(ctx, name)
+
+	status, err := a.waitForWorkflow(ctx, name)
+	if err != nil {
+		return nil, err
+	}
+	if status.Phase != argo.PhaseSucceeded {
+		return nil, temporal.NewNonRetryableApplicationError(
+			fmt.Sprintf("training workflow %s %s: %s", name, status.Phase, status.Message), ErrTypeTrainingRunFailed, nil)
+	}
+
+	return &SubmitTrainingRunOutput{RunID: name, Status: status.Phase, ModelPath: ModelArtifactKey(input.JobID)}, nil
+}
+
+func validateTrainingRun(input SubmitTrainingRunInput) (string, error) {
+	unsupported := func(msg string) error {
+		return temporal.NewNonRetryableApplicationError(msg, ErrTypeUnsupportedTraining, nil)
+	}
+	template, ok := trainingTemplates[input.TaskType]
+	switch {
+	case !ok:
+		return "", unsupported(fmt.Sprintf("no training template for task type %q (supported: locomotion, reach)", input.TaskType))
+	case len(input.Hyperparameters) > 0:
+		return "", unsupported("custom hyperparameters require the kubeflow backend")
+	case input.BaseModel != "":
+		return "", unsupported("fine-tuning from a base model is not supported by the training templates")
+	case input.FromExperience != "":
+		return "", unsupported("training from collected experience is not supported by the training templates")
+	}
+	return template, nil
+}
+
+// waitForWorkflow polls until the workflow reaches a terminal phase.
+func (a *TrainingActivities) waitForWorkflow(ctx context.Context, name string) (argo.Status, error) {
+	interval := a.PollInterval
+	if interval <= 0 {
+		interval = DefaultPollInterval
+	}
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+
+	consecutiveErrs := 0
+	for {
+		status, err := a.Runner.GetWorkflowStatus(ctx, name)
+		switch {
+		case errors.Is(err, argo.ErrWorkflowNotFound):
+			return argo.Status{}, temporal.NewNonRetryableApplicationError(
+				fmt.Sprintf("training workflow %s disappeared", name), ErrTypeTrainingRunFailed, err)
+		case err != nil:
+			consecutiveErrs++
+			slog.Warn("poll training workflow failed", "workflow", name, "attempt", consecutiveErrs, "error", err)
+			if consecutiveErrs >= MaxConsecutivePollErrors {
+				return argo.Status{}, fmt.Errorf("poll training workflow %s: %w", name, err)
+			}
+		default:
+			consecutiveErrs = 0
+			if status.Done() {
+				return status, nil
+			}
+		}
+		activity.RecordHeartbeat(ctx, name)
+
+		select {
+		case <-ctx.Done():
+			return argo.Status{}, ctx.Err()
+		case <-ticker.C:
+		}
+	}
 }
 
 // EvaluateModelInput is the input for EvaluateTrainedModel.
 type EvaluateModelInput struct {
-	ModelArtifactURL string `json:"model_artifact_url"`
-	BaselineModelID  string `json:"baseline_model_id"`
-	EvalEpisodes     int    `json:"eval_episodes"`
+	JobID           string `json:"job_id"`
+	BaselineModelID string `json:"baseline_model_id"` // empty = currently deployed model, if any
 }
 
 // EvaluateModelOutput is the result of model evaluation.
 type EvaluateModelOutput struct {
-	MeanReward      float64 `json:"mean_reward"`
-	BaselineReward  float64 `json:"baseline_reward"`
-	Improvement     float64 `json:"improvement_pct"`
-	PassesGate      bool    `json:"passes_gate"`
+	PassRate       float64 `json:"pass_rate"`
+	MeanReward     float64 `json:"mean_reward"`
+	BaselineID     string  `json:"baseline_id"`
+	BaselineReward float64 `json:"baseline_reward"`
+	Improvement    float64 `json:"improvement_pct"`
+	PassesGate     bool    `json:"passes_gate"`
+	GateReason     string  `json:"gate_reason,omitempty"`
 }
 
-// EvaluateTrainedModel compares the trained model against the current baseline
-// using the model registry's eval_mean_reward metric. If no real eval data is
-// available (first model), the gate auto-passes.
+// evalResults is the subset of eval_results.json we read.
+type evalResults struct {
+	PassRate   float64 `json:"pass_rate"`
+	MeanReward float64 `json:"mean_reward"`
+}
+
+// EvaluateTrainedModel reads the job's evaluation results from the models
+// bucket and applies the promotion gate against the baseline model.
 func (a *TrainingActivities) EvaluateTrainedModel(ctx context.Context, input EvaluateModelInput) (*EvaluateModelOutput, error) {
-	output := &EvaluateModelOutput{}
+	if a.Artifacts == nil {
+		return nil, temporal.NewNonRetryableApplicationError(
+			"artifact store not configured", ErrTypeTrainingNotConfigured, nil)
+	}
+	raw, err := a.Artifacts.Get(ctx, EvalResultsKey(input.JobID))
+	if err != nil {
+		return nil, fmt.Errorf("read eval results for job %s: %w", input.JobID, err)
+	}
+	var res evalResults
+	if err := json.Unmarshal(raw, &res); err != nil {
+		return nil, temporal.NewNonRetryableApplicationError(
+			fmt.Sprintf("parse eval results for job %s: %v", input.JobID, err), ErrTypeTrainingRunFailed, err)
+	}
 
-	// Get baseline model metrics
-	if input.BaselineModelID != "" {
-		baseline, err := a.Models.GetModel(ctx, input.BaselineModelID)
-		if err == nil {
-			output.BaselineReward = metricFloat(baseline.Metrics, "eval_mean_reward")
+	out := &EvaluateModelOutput{PassRate: res.PassRate, MeanReward: res.MeanReward}
+	baseline := a.findBaseline(ctx, input.BaselineModelID)
+	var baselineMetrics map[string]any
+	if baseline != nil {
+		out.BaselineID = baseline.ID
+		baselineMetrics = baseline.Metrics
+		out.BaselineReward = metricFloat(baseline.Metrics, modelgate.MetricEvalMeanReward)
+		if out.BaselineReward > 0 {
+			out.Improvement = (out.MeanReward - out.BaselineReward) / out.BaselineReward * 100
 		}
 	}
 
-	// Try to read eval results from the most recently staged model's metrics
-	// (the training callback writes eval_mean_reward into the model record).
-	// If no staged model exists yet, this is the first training run — auto-pass.
-	staged, err := a.Models.ListModels(ctx, "staged")
-	if err == nil && len(staged) > 0 {
-		reward := metricFloat(staged[0].Metrics, "eval_mean_reward")
-		if reward > 0 {
-			output.MeanReward = reward
-		}
+	candidate := map[string]any{
+		modelgate.MetricEvalPassRate:   res.PassRate,
+		modelgate.MetricEvalMeanReward: res.MeanReward,
 	}
-
-	// If no real eval data found, first model auto-passes the gate
-	if output.MeanReward == 0 && output.BaselineReward == 0 {
-		output.PassesGate = true
-		slog.Info("first model — auto-passing evaluation gate")
-		return output, nil
+	if gateErr := a.Gate.Check(candidate, baselineMetrics); gateErr != nil {
+		out.GateReason = gateErr.Error()
+	} else {
+		out.PassesGate = true
 	}
-
-	if output.BaselineReward > 0 {
-		output.Improvement = ((output.MeanReward - output.BaselineReward) / output.BaselineReward) * 100
-	}
-
-	// Gate: new model must be within 5% of baseline (early training may be worse)
-	output.PassesGate = output.BaselineReward == 0 || output.MeanReward >= output.BaselineReward*0.95
 
 	slog.Info("model evaluation complete",
-		"mean_reward", output.MeanReward,
-		"baseline_reward", output.BaselineReward,
-		"improvement", fmt.Sprintf("%.1f%%", output.Improvement),
-		"passes_gate", output.PassesGate,
+		"job_id", input.JobID,
+		"pass_rate", out.PassRate,
+		"mean_reward", out.MeanReward,
+		"baseline", out.BaselineID,
+		"passes_gate", out.PassesGate,
+		"reason", out.GateReason,
 	)
+	return out, nil
+}
 
-	return output, nil
+// findBaseline returns the requested baseline, or the deployed model, or nil.
+func (a *TrainingActivities) findBaseline(ctx context.Context, id string) *store.ModelRecord {
+	if id != "" {
+		if m, err := a.Models.GetModel(ctx, id); err == nil {
+			return m
+		}
+		slog.Warn("baseline model not found, falling back to deployed model", "baseline", id)
+	}
+	deployed, err := a.Models.ListModels(ctx, "deployed")
+	if err != nil || len(deployed) == 0 {
+		return nil
+	}
+	return deployed[0]
 }
 
 // RegisterTrainedModelInput is the input for RegisterTrainedModel.
@@ -187,9 +333,14 @@ type RegisterTrainedModelInput struct {
 	Version     string  `json:"version"`
 	ArtifactURL string  `json:"artifact_url"`
 	MeanReward  float64 `json:"mean_reward"`
+	PassRate    float64 `json:"pass_rate"`
 	Environment string  `json:"environment"`
 	TaskType    string  `json:"task_type"`
 	Algorithm   string  `json:"algorithm"`
+	// Provenance: how the model was produced.
+	Backend         string            `json:"backend"`
+	Hyperparameters map[string]string `json:"hyperparameters,omitempty"`
+	HPOExperiment   string            `json:"hpo_experiment,omitempty"`
 }
 
 // RegisterTrainedModel registers a trained model in the model registry as staged.
@@ -203,13 +354,21 @@ func (a *TrainingActivities) RegisterTrainedModel(ctx context.Context, input Reg
 		ArtifactURL: input.ArtifactURL,
 		Status:      "staged",
 		Metrics: map[string]any{
-			"eval_mean_reward": input.MeanReward,
-			"environment":      input.Environment,
-			"task_type":        input.TaskType,
-			"algorithm":        input.Algorithm,
-			"trained_at":       time.Now().UTC().Format(time.RFC3339),
+			modelgate.MetricEvalMeanReward: input.MeanReward,
+			modelgate.MetricEvalPassRate:   input.PassRate,
+			"environment":                  input.Environment,
+			"task_type":                    input.TaskType,
+			"algorithm":                    input.Algorithm,
+			"backend":                      input.Backend,
+			"trained_at":                   time.Now().UTC().Format(time.RFC3339),
 		},
 		CreatedAt: time.Now().UTC(),
+	}
+	if len(input.Hyperparameters) > 0 {
+		model.Metrics["hyperparameters"] = input.Hyperparameters
+	}
+	if input.HPOExperiment != "" {
+		model.Metrics["hpo_experiment"] = input.HPOExperiment
 	}
 
 	if err := a.Models.RegisterModel(ctx, model); err != nil {
@@ -240,17 +399,13 @@ func (a *TrainingActivities) CheckRetrainingNeeded(ctx context.Context, threshol
 	return successRate > 0 && successRate < threshold, nil
 }
 
-// NotifyTrainingComplete sends a notification (placeholder for Slack/PagerDuty).
+// NotifyTrainingComplete logs the pipeline outcome. Placeholder for a
+// Slack/PagerDuty integration.
 func (a *TrainingActivities) NotifyTrainingComplete(ctx context.Context, modelID string, deployed bool) error {
 	status := "registered (staged)"
 	if deployed {
 		status = "deployed via canary"
 	}
 	slog.Info("training pipeline complete", "model", modelID, "status", status)
-
-	// Placeholder: POST to Slack webhook, PagerDuty, etc.
-	_ = http.DefaultClient
-	_ = json.Marshal
-
 	return nil
 }

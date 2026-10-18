@@ -36,7 +36,7 @@ Problem Framing → High-Level Design → Data & Features → Modelling → Infe
 
 ## 2. High-Level Design
 
-FleetOS follows the **Menlo OS** pattern — all reasoning on the platform, robots handle execution only.
+FleetOS uses a **cloud-brain** architecture — all reasoning on the platform, robots handle execution only.
 
 ```
 ┌─ Playground (Robot) ──────────────────────────────┐
@@ -54,9 +54,11 @@ FleetOS follows the **Menlo OS** pattern — all reasoning on the platform, robo
 │                        ├─ Redis hot state          │
 │                        └─ Postgres cold metadata   │
 │                                                    │
-│  Training (Kubeflow)                               │
-│    ├─ Train PPO policy                             │
-│    └─ Evaluate on 5 scenarios                      │
+│  Training (Temporal TrainingPipelineWorkflow)      │
+│    ├─ [Katib HPO: TPE, 4 trials × 2 parallel]      │
+│    ├─ Train: Argo workflow or Kubeflow TrainJob    │
+│    ├─ Evaluate on 5 scenarios → eval gate          │
+│    └─ Register (staged) → [auto canary deploy]     │
 │         ↓                                          │
 │  Model Registry (staged → canary → deployed)       │
 │         ↓                                          │
@@ -76,7 +78,9 @@ FleetOS follows the **Menlo OS** pattern — all reasoning on the platform, robo
 ```
 
 **Key files:**
-- `platform/training/pipeline.py` — Kubeflow 2-stage DAG (train + evaluate)
+- `platform/internal/temporal/workflows/training_pipeline.go` — training pipeline ([Katib] → train → evaluate → gate → register → canary)
+- `platform/internal/kubeflow/` — Kubeflow Trainer TrainJob + Katib Experiment builders; `platform/deploy/k8s/workflows/` — Argo WorkflowTemplates
+- `platform/training/pipeline.py` — Kubeflow *Pipelines* (KFP) DAG definition; KFP is not installed and nothing invokes it (kept as reference)
 - `platform/internal/temporal/workflows/deployment.go` — canary deployment workflow
 - `platform/inference/server.py` — model serving + semantic resolution
 
@@ -152,9 +156,10 @@ Simulator (50 Hz) → Experience Writer → S3 NDJSON (500 transitions/batch)
 | Behavior Cloning | Supervised pre-training on (obs, action) pairs, SB3-compatible output | `training/train_bc.py` |
 | Autoencoder | Unsupervised 86→32-dim representation learning on observations | `training/train_autoencoder.py` |
 | Normalisation | VecNormalize (obs + reward), clip_obs=10.0 | `train_locomotion.py` |
-| Fine-tuning | `--base-model` loads prior policy (including BC-pretrained); `--from-experience` pre-seeds normaliser | All training scripts |
+| Fine-tuning | `--base-model` loads prior policy (including BC-pretrained); `--from-experience` pre-seeds normaliser | All training scripts (standalone; the pipeline rejects these runs for now) |
 | Export | `.zip` (SB3) + `.onnx` (PyTorch, locomotion only) | `train_locomotion.py` |
-| Training infra | Kubeflow pipeline, 4 CPU / 8 Gi per job | `training/pipeline.py` |
+| Training infra | Argo WorkflowTemplates or Kubeflow Trainer TrainJobs (runtime `fleetos-sb3`, 2–4 CPU / 3–6 Gi); CPU-only on local k3s | `deploy/k8s/workflows/`, `internal/kubeflow/` |
+| Hyperparameter search | Katib Experiment (TPE default) over learning_rate, n_steps, ent_coef → best params train the final model | `internal/kubeflow/`, `train_locomotion.py` flags |
 
 ### 4.2 Training Paradigms
 
@@ -170,7 +175,9 @@ Simulator (50 Hz) → Experience Writer → S3 NDJSON (500 transitions/batch)
 
 | Gap | Impact | Suggested approach |
 |-----|--------|-------------------|
-| **No hyperparameter tuning** | Current values are SB3 defaults, not optimised | Add Optuna or Kubeflow Katib sweep over lr, n_steps, net_arch |
+| **Small HPO budget** | Katib search exists (locomotion only) but defaults to 4 trials × 20k timesteps — enough to exercise the loop, not to find good parameters | Raise `kubeflow.hpo.maxTrials` / `trialTimesteps` on real hardware; add net_arch + reach/grasp search spaces |
+| **Inference ignores VecNormalize** | `vec_normalize.pkl` is saved but not applied at inference, so served observations differ from training | Load the stats alongside each policy in the inference cache |
+| **Experience not used by the pipeline** | `CollectExperienceStats` returns a fixed estimate; experience/fine-tune runs are rejected | Count real S3 batches; add templates/TrainJobs that pass `--from-experience` / `--base-model` |
 | **No experiment tracking** | Can't compare runs side-by-side | Integrate MLflow or W&B; log to existing S3 backend |
 | **No curriculum learning** | Policy trains on single difficulty | Progressive env configs: gravity, friction, wind ramp over training |
 | **Fixed architecture** | MLP may underperform for high-dim obs | Try LSTM/attention for temporal dependencies in joint dynamics |
@@ -265,13 +272,13 @@ This stage is the least covered. It focuses on understanding *why* the policy be
 
 1. **Experiment tracking** — Integrate MLflow backed by existing MinIO. Enables comparing algorithms with proper run history.
 
-2. **Hyperparameter tuning** — Add Optuna sweep over learning rate, network size, and n_steps. Run as Kubeflow parallel trials.
+2. **Hyperparameter tuning at scale** — Katib search is wired in (`use_katib: true`); extend the search space (network size) and budget, and add reach/grasp.
 
 3. **Autoencoder as feature extractor** — Plug trained encoder into SB3 as custom `FeaturesExtractor` for downstream RL tasks.
 
 4. **Feature versioning** — Hash the observation space config and store alongside model in registry. Validate at inference load.
 
-5. **Multi-model inference routing** — Update inference server to load task-specific models (locomotion, reach, grasp) based on command type.
+5. **Simulator canary routing** — Inference already serves per-request artifacts (LRU cache, PPO+SAC); route simulator calls through each robot's assigned model too.
 
 6. **Automated BC→RL pipeline** — Temporal workflow that chains behavior cloning pre-training with RL fine-tuning as a single pipeline.
 

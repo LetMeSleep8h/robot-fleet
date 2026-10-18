@@ -2,7 +2,7 @@
 
 ## Project Overview
 
-FleetOS is a distributed robot fleet management platform organized as a monorepo, following the **Menlo OS architecture**: high-level reasoning happens in the platform (cloud); robots handle execution only. The platform ingests telemetry via gRPC/Kafka, runs AI inference, manages model lifecycle, and sends commands back to robots via gRPC.
+FleetOS is a distributed robot fleet management platform organized as a monorepo, built on a **cloud-brain architecture**: high-level reasoning happens in the platform (cloud); robots handle execution only. The platform ingests telemetry via gRPC/Kafka, runs AI inference, manages model lifecycle, and sends commands back to robots via gRPC.
 
 ## Monorepo Layout
 
@@ -11,7 +11,7 @@ FleetOS is a distributed robot fleet management platform organized as a monorepo
 
 All Go platform code lives under `platform/`. The Go module root is `platform/go.mod`.
 
-## Architecture (Menlo OS Pattern)
+## Architecture (Cloud Brain, Robot Body)
 
 ```
 ┌─ Playground (Robot) ─────────────────────────────┐
@@ -25,23 +25,28 @@ All Go platform code lives under `platform/`. The Go module root is `platform/go
 ┌─ Platform (Cloud Brain) ─────────────────────────┐
 │  Ingestion (gRPC :50051)                         │
 │    ├─ StreamTelemetry → Kafka → Processor        │
-│    └─ StreamCommands ← Redis commands bridge     │
+│    └─ StreamCommands ← Kafka commands.dispatch   │
 │  API (:8080) — REST + WebSocket + auth + billing │
 │  Inference (:8081) — SB3 PPO policy serving      │
 │    ├─ Loads model from MinIO (S3)                │
 │    └─ Polls model registry for deployments       │
-│  Training (manual) → MinIO → Model Registry      │
-│  Processor → Postgres/Redis/S3                   │
+│  Worker (Temporal) — commands, canary deploys,   │
+│    training pipeline, billing, webhooks          │
+│  Training: Argo or Kubeflow TrainJob [+Katib] → S3│
+│  Processor → Postgres/Redis/S3/ClickHouse        │
 └──────────────────────────────────────────────────┘
 ```
 
-Six services:
-- **simulator** (`playground/simulator/`) — MuJoCo physics, sends telemetry via gRPC, receives commands via gRPC
-- **ingestion** (`platform/cmd/ingestion/`) — gRPC server → Kafka producer, bridges Redis commands → gRPC StreamCommands
-- **api** (`platform/cmd/api/`) — REST API + WebSocket + auth + rate limiting + billing
-- **processor** (`platform/cmd/processor/`) — Kafka consumer → Postgres/Redis/S3
+Services:
+- **simulator** (`playground/simulator/`) — MuJoCo physics (Python), sends telemetry via gRPC, receives commands via gRPC, writes experience to S3
+- **ingestion** (`platform/cmd/ingestion/`) — gRPC server → Kafka producer; consumes `robot.commands.dispatch` from Kafka → gRPC StreamCommands
+- **api** (`platform/cmd/api/`) — REST API + WebSocket + auth + rate limiting + billing; serves the admin console at `/admin/`
+- **processor** (`platform/cmd/processor/`) — Kafka consumer → Postgres/Redis/S3/ClickHouse; starts Temporal command workflows
+- **worker** (`platform/cmd/worker/`) — Temporal worker: CommandDispatch, ModelDeployment (canary), TrainingPipeline, BillingCycle, WebhookFanout workflows
 - **inference** (`platform/inference/`) — SB3 PPO policy serving + FAISS semantic command resolution, loads models from S3
-- **training** (`platform/training/`) — Manual training pipelines, uploads to S3
+- **training** (`platform/training/`) — Training scripts (PPO, SAC+HER, CQL, BC, autoencoder). The Temporal pipeline runs locomotion/reach as Argo WorkflowTemplates or Kubeflow Trainer TrainJobs (runtime `fleetos-sb3`), optionally after a Katib HPO search; scripts also run locally. Uploads to S3
+
+Also: `platform/cmd/fleetos/` (cobra CLI client for the API), `platform/admin-web/` (React admin console), `playground/web/` (React + Three.js 3D dashboard), `playground/ros2_bridge/` (ROS 2 topic bridge). `playground/cmd/simulator/` + `playground/internal/` is the legacy Go kinematic simulator (`Dockerfile.simulator-go`), superseded by the MuJoCo one.
 
 ## Quick Commands
 
@@ -87,6 +92,14 @@ cd platform && make k8s-train TASK=locomotion TIMESTEPS=50000  # Submit training
 cd platform && make k8s-argocd-password  # Get ArgoCD admin password
 cd platform && make k8s-down      # Delete kind cluster
 
+# Deploy to k3s on Colima (lightweight; Argo + Kubeflow Trainer + Katib)
+cd platform && make k3s-up        # Colima k3s + images + Argo Workflows + Kubeflow Trainer v2.3.0 + Katib v0.19.0 + Helm
+cd platform && make k3s-images    # Rebuild images + restart platform pods
+cd platform && make k3s-train TASK=locomotion TIMESTEPS=20000  # One-off Argo training workflow
+cd platform && make k3s-down      # colima stop (MinIO PVC survives)
+# Full pipeline ([Katib] → train → eval → gate → register → canary):
+#   POST /api/v1/training/pipelines {"task_type":"locomotion","use_katib":true}
+
 # K8s dashboards (all NodePort, no port-forward needed after make k8s-up):
 #   ArgoCD:         http://localhost:30080
 #   Argo Workflows: https://localhost:30746
@@ -104,15 +117,21 @@ python3 train_locomotion.py --job-id demo --timesteps 50000 \
 
 | Path | Purpose |
 |------|---------|
-| `platform/cmd/` | Service entry points (main.go files) |
-| `platform/internal/simulator/` | Robot physics simulation, fleet management |
+| `platform/cmd/` | Entry points: `api`, `ingestion`, `processor`, `worker`, `fleetos` (CLI) |
 | `platform/internal/ingestion/` | gRPC telemetry handler, Kafka producer/consumer |
 | `platform/internal/api/` | Thin HTTP handlers + WebSocket (no business logic) |
 | `platform/internal/service/` | Business logic layer (accepts interfaces, owns domain logic) |
 | `platform/internal/command/` | Semantic command registry (strategy pattern) |
-| `platform/internal/auth/` | JWT + API key auth, RBAC middleware |
+| `platform/internal/auth/` | JWT + OAuth2/OIDC + API key auth, RBAC middleware |
+| `platform/internal/argo/` | Argo Workflows Server REST client (submit WorkflowTemplates, poll status) |
+| `platform/internal/kube/` | Minimal in-cluster Kubernetes REST client (create/get custom resources) |
+| `platform/internal/kubeflow/` | Kubeflow Trainer TrainJob + Katib Experiment builders and status parsing |
+| `platform/internal/modelgate/` | Promotion gate (eval pass rate + reward vs deployed baseline) |
+| `platform/internal/temporal/` | Temporal client, workflows, activities, Kafka ack bridge |
+| `platform/internal/billing/` | Pricing tiers |
+| `platform/internal/circuitbreaker/` | Circuit breaker for downstream calls |
 | `platform/internal/middleware/` | Rate limiting, usage metering, logging, CORS, Prometheus |
-| `platform/internal/store/` | PostgreSQL and Redis data access (implements `RobotRepository`, `CacheStore` interfaces) |
+| `platform/internal/store/` | PostgreSQL, Redis, S3, ClickHouse data access (implements `RobotRepository`, `CacheStore` interfaces) |
 | `platform/internal/config/` | Env-based configuration |
 | `platform/internal/telemetry/` | Generated protobuf code (telemetry.proto) |
 | `platform/internal/models/` | Generated protobuf code (api.proto) |
@@ -124,10 +143,12 @@ python3 train_locomotion.py --job-id demo --timesteps 50000 \
 | `platform/sdk/typescript/` | TypeScript SDK (typed interfaces) |
 | `platform/training/` | Model training pipelines |
 | `platform/analytics/` | Spark analytics pipeline |
-| `platform/docs/` | OpenAPI spec, architecture diagrams |
+| `platform/docs/` | OpenAPI spec, `architecture.md` (Mermaid), `ml-pipeline.md` |
+| `platform/admin-web/` | React admin console (tenants, API keys, billing) |
 | `playground/simulator/` | MuJoCo robot simulator (Python) — physics + telemetry + command execution |
 | `platform/inference/` | SB3 PPO inference service (Python) |
-| `playground/web/` | React frontend for robot dashboard |
+| `playground/web/` | React + Three.js 3D robot dashboard |
+| `playground/ros2_bridge/` | ROS 2 bridge (JointState, PoseStamped, BatteryState, LaserScan) |
 | `playground/proto/` | Protobuf definitions (playground copy, stubs generated at Docker build) |
 
 ## Go Best Practices (MUST FOLLOW)
@@ -244,7 +265,8 @@ python3 train_locomotion.py --job-id demo --timesteps 50000 \
 - The `model_registry` table exists in `platform/migrations/001_init.sql` — it MUST have corresponding Go code.
 - Models have lifecycle: `staged → canary → deployed → archived`.
 - Model versions are stored with `artifact_url` (S3 path), `metrics` (JSONB), and deployment timestamps.
-- The inference service loads models from S3 via the registry API.
+- The inference service loads models from S3 via the registry API; API inference requests carry the robot's assigned `artifact_url` (canary routing).
+- Promotion is gated (`internal/modelgate`): `POST /models/{id}/deploy` rejects unevaluated/failing models (422) and otherwise starts the Temporal canary (`ModelDeploymentWorkflow`); only its final step (`PromoteModel`) marks a model deployed.
 
 ### SDK Requirements
 
@@ -267,6 +289,10 @@ Key variables (all have defaults for local dev):
 | `SIM_TICK_MS` | 100 | Simulation tick interval (ms) |
 | `JWT_SECRET` | dev-secret-change-me | JWT signing secret |
 | `RATE_LIMIT_RPS` | 100 | Per-tenant rate limit |
+| `ARGO_SERVER_URL` | (empty = training off) | Argo Server REST API used by api + worker |
+| `MODEL_MIN_EVAL_PASS_RATE` | 0.5 | Promotion gate: minimum eval scenario pass rate |
+| `KUBEFLOW_ENABLED` | false | Worker submits Kubeflow TrainJobs / Katib Experiments (needs Trainer + Katib installed) |
+| `HPO_ALGORITHM` | tpe | Katib algorithm (also `HPO_MAX_TRIALS`=4, `HPO_PARALLEL_TRIALS`=2, `HPO_TRIAL_TIMESTEPS`=20000) |
 
 ## API Authentication
 

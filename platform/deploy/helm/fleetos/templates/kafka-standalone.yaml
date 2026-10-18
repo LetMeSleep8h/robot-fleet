@@ -1,4 +1,4 @@
-{{- if .Values.kafkaStandalone.enabled }}
+{{- if (.Values.kafkaStandalone).enabled }}
 ---
 apiVersion: v1
 kind: Service

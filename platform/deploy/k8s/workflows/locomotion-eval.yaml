@@ -1,0 +1,42 @@
+# Eval-only workflow for an already-trained locomotion policy.
+# Submitted by the API (POST /api/v1/locomotion/evals) for an existing job.
+# Writes evaluations/<eval-id>/eval_results.json and calls EVAL_CALLBACK_URL.
+apiVersion: argoproj.io/v1alpha1
+kind: WorkflowTemplate
+metadata:
+  name: fleetos-locomotion-eval
+spec:
+  entrypoint: evaluate
+  arguments:
+    parameters:
+      - name: eval-id
+        value: "locomotion-eval-default"
+      - name: artifact-url  # S3 key, e.g. training/<job-id>/policy.zip
+        value: ""
+      - name: scenarios
+        value: "100"
+      - name: env-id
+        value: "FleetOS-Humanoid-v2"
+
+  templates:
+    - name: evaluate
+      container:
+        image: fleetos/training:latest
+        imagePullPolicy: Never
+        command: [python, evaluate_policy.py]
+        args:
+          - "--eval-id={{workflow.parameters.eval-id}}"
+          - "--model-path=s3://fleetos-models/{{workflow.parameters.artifact-url}}"
+          - "--scenarios={{workflow.parameters.scenarios}}"
+          - "--env-id={{workflow.parameters.env-id}}"
+          - "--output-dir=/tmp/eval"
+        envFrom:
+          - secretRef:
+              name: fleetos-training
+        resources:
+          requests:
+            cpu: "1"
+            memory: 2Gi
+          limits:
+            cpu: "2"
+            memory: 3Gi

@@ -2,7 +2,7 @@
 
 Robot simulation environment for the FleetOS platform. The playground acts like a **real robot** — it runs physics, sends telemetry (including performance metrics), and executes commands. All reasoning (inference, model management, billing) happens in the platform.
 
-This follows the **Menlo OS architecture**: high-level reasoning in the cloud, execution on the robot.
+FleetOS uses a **cloud-brain architecture**: high-level reasoning in the cloud, execution on the robot.
 
 ## Architecture
 

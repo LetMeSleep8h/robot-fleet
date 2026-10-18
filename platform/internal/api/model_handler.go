@@ -70,17 +70,18 @@ func (h *ModelHandler) ListModels(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// DeployModel transitions a model to deployed status.
+// DeployModel starts a gated canary rollout for a staged model.
 func (h *ModelHandler) DeployModel(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 
-	if err := h.svc.DeployModel(r.Context(), id); err != nil {
+	res, err := h.svc.DeployModel(r.Context(), id)
+	if err != nil {
 		slog.Error("deploy model failed", "model", id, "error", err)
-		writeError(w, http.StatusInternalServerError, "failed to deploy model")
+		writeServiceError(w, err, "failed to deploy model")
 		return
 	}
 
-	writeJSON(w, http.StatusOK, map[string]string{"status": "deployed", "model_id": id})
+	writeJSON(w, http.StatusAccepted, res)
 }
 
 // ArchiveModel transitions a model to archived status.

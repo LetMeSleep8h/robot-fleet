@@ -24,6 +24,12 @@ type robotService struct {
 	inferenceTimeout  time.Duration
 	temporalClient    client.Client   // nil when Temporal is disabled
 	commandProducer   CommandProducer // nil when Kafka is unavailable
+	models            ModelLookup     // nil = inference always uses its active model
+}
+
+// ModelLookup resolves a registry model ID to its record (artifact, version).
+type ModelLookup interface {
+	GetModel(ctx context.Context, id string) (*store.ModelRecord, error)
 }
 
 // NewRobotService creates a new RobotService with the given dependencies.

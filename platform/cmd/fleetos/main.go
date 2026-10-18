@@ -121,7 +121,7 @@ func commandCmd() *cobra.Command {
 
 	forward := &cobra.Command{
 		Use:   "forward [robot-id] [distance]",
-		Short: "Move robot forward (Menlo-compatible)",
+		Short: "Move robot forward",
 		Args:  cobra.RangeArgs(1, 2),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			dist := "1.0"
@@ -170,13 +170,13 @@ func commandCmd() *cobra.Command {
 	return cmd
 }
 
-// --- Semantic Command (like Menlo's semantic-command) ---
+// --- Semantic Command ---
 
 func semanticCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "semantic [robot-id] [instruction...]",
 		Short: "Send a natural language command to a robot (GR00T-style)",
-		Long:  "Interprets natural language instructions and converts them to robot actions using AI inference. Mirrors Menlo's v1/robots/{id}/semantic-command API.",
+		Long:  "Interprets natural language instructions and converts them to robot actions using AI inference.",
 		Args:  cobra.MinimumNArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			robotID := args[0]

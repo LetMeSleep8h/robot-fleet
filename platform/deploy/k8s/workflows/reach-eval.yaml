@@ -1,0 +1,41 @@
+# Eval-only workflow for an already-trained reach (SAC+HER) policy.
+# Submitted by the API (POST /api/v1/locomotion/evals) for an existing SAC job.
+# Writes evaluations/<eval-id>/eval_results.json and calls EVAL_CALLBACK_URL.
+apiVersion: argoproj.io/v1alpha1
+kind: WorkflowTemplate
+metadata:
+  name: fleetos-reach-eval
+spec:
+  entrypoint: evaluate
+  arguments:
+    parameters:
+      - name: eval-id
+        value: "reach-eval-default"
+      - name: artifact-url  # S3 key, e.g. training/<job-id>/policy.zip
+        value: ""
+      - name: scenarios  # total episodes, spread across the 5 reach scenarios
+        value: "100"
+      - name: env-id  # accepted for interface parity; reach always uses FleetOS-Reach-v1
+        value: "FleetOS-Reach-v1"
+
+  templates:
+    - name: evaluate
+      container:
+        image: fleetos/training:latest
+        imagePullPolicy: Never
+        command: [python, evaluate_reach.py]
+        args:
+          - "--eval-id={{workflow.parameters.eval-id}}"
+          - "--model-path=s3://fleetos-models/{{workflow.parameters.artifact-url}}"
+          - "--scenarios={{workflow.parameters.scenarios}}"
+          - "--output-dir=/tmp/eval"
+        envFrom:
+          - secretRef:
+              name: fleetos-training
+        resources:
+          requests:
+            cpu: "1"
+            memory: 2Gi
+          limits:
+            cpu: "2"
+            memory: 3Gi

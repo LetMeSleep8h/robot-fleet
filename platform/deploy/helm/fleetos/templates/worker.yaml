@@ -17,6 +17,10 @@ spec:
       labels:
         app: fleetos-worker
     spec:
+      {{- if .Values.kubeflow.enabled }}
+      # Creates TrainJobs / Katib Experiments (see kubeflow-training.yaml)
+      serviceAccountName: {{ .Release.Name }}-worker
+      {{- end }}
       securityContext:
         runAsNonRoot: true
         runAsUser: 100
@@ -66,6 +70,7 @@ spec:
                 secretKeyRef:
                   name: {{ .Release.Name }}-s3-secret
                   key: secret-key
+            {{- include "fleetos.trainingEnv" . | nindent 12 }}
             - name: ENVIRONMENT
               value: {{ .Values.global.environment }}
           resources:

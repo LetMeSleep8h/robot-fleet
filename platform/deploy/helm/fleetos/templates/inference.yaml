@@ -40,6 +40,9 @@ spec:
               value: "8081"
             - name: PLATFORM_API_URL
               value: "http://{{ .Release.Name }}-api:{{ .Values.api.service.port }}"
+            # Read-only key used at startup to find the currently deployed model.
+            - name: PLATFORM_API_KEY
+              value: {{ .Values.inference.platformApiKey | default "" | quote }}
             - name: S3_ENDPOINT
               value: "{{ .Release.Name }}-minio:9000"
             - name: S3_BUCKET

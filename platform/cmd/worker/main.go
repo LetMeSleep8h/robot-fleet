@@ -9,8 +9,12 @@ import (
 
 	"go.temporal.io/sdk/worker"
 
+	"github.com/dimuthu/robot-fleet/internal/argo"
 	"github.com/dimuthu/robot-fleet/internal/config"
 	"github.com/dimuthu/robot-fleet/internal/ingestion"
+	"github.com/dimuthu/robot-fleet/internal/kube"
+	"github.com/dimuthu/robot-fleet/internal/kubeflow"
+	"github.com/dimuthu/robot-fleet/internal/modelgate"
 	"github.com/dimuthu/robot-fleet/internal/service"
 	"github.com/dimuthu/robot-fleet/internal/store"
 	temporalpkg "github.com/dimuthu/robot-fleet/internal/temporal"
@@ -115,22 +119,62 @@ func main() {
 	billingWorker.RegisterWorkflow(workflows.BillingCycleWorkflow)
 	billingWorker.RegisterActivity(billingActs)
 
-	// Training pipeline worker
-	argoSubmitter := &activities.ArgoSubmitter{
-		KubeContext: os.Getenv("ARGO_KUBE_CONTEXT"),
-		Namespace:   os.Getenv("ARGO_NAMESPACE"),
+	// Training pipeline worker. Without ARGO_SERVER_URL, training runs fail
+	// with TrainingNotConfigured instead of pretending to train.
+	trainingActs := &activities.TrainingActivities{
+		Models: pg,
+		Robots: pg,
+		Gate:   modelgate.Policy{MinPassRate: cfg.MinEvalPassRate, MaxRewardRegression: modelgate.DefaultMaxRewardRegression},
 	}
-	// If no kube context configured, submitter stays nil (stub mode)
-	if argoSubmitter.KubeContext == "" {
-		argoSubmitter = nil
+	if cfg.ArgoServerURL != "" {
+		trainingActs.Runner = argo.NewClient(argo.Config{
+			ServerURL:          cfg.ArgoServerURL,
+			Namespace:          cfg.ArgoNamespace,
+			Token:              cfg.ArgoToken,
+			InsecureSkipVerify: cfg.ArgoInsecureSkipVerify,
+		})
+		slog.Info("training enabled", "argo_server", cfg.ArgoServerURL, "namespace", cfg.ArgoNamespace)
+	} else {
+		slog.Warn("ARGO_SERVER_URL not set: training pipeline runs will fail")
 	}
-	trainingActs := &activities.TrainingActivities{Models: pg, Robots: pg, Submitter: argoSubmitter}
+	trainingActs.ModelsBucket = cfg.ModelsBucket
+	trainingActs.HPO = activities.HPOSettings{
+		Algorithm:      cfg.HPOAlgorithm,
+		MaxTrials:      cfg.HPOMaxTrials,
+		ParallelTrials: cfg.HPOParallelTrials,
+		TrialTimesteps: cfg.HPOTrialTimesteps,
+	}
+	if cfg.KubeflowEnabled {
+		kubeCfg, err := kube.InClusterConfig()
+		if err == nil {
+			var kc *kube.Client
+			if kc, err = kube.NewClient(kubeCfg); err == nil {
+				trainingActs.Kubeflow = kubeflow.NewRunner(kc, kubeflow.Config{
+					Namespace: cfg.KubeflowNamespace,
+					Runtime:   cfg.KubeflowRuntime,
+					Image:     cfg.TrainingImage,
+				})
+				slog.Info("kubeflow enabled", "namespace", cfg.KubeflowNamespace, "runtime", cfg.KubeflowRuntime, "hpo_algorithm", cfg.HPOAlgorithm)
+			}
+		}
+		if err != nil {
+			slog.Error("kubeflow enabled but kubernetes client unavailable: kubeflow runs will fail", "error", err)
+		}
+	}
+	models, err := store.NewS3Store(ctx, store.S3Config{
+		Endpoint: cfg.S3Endpoint, Bucket: cfg.ModelsBucket,
+		AccessKey: cfg.S3AccessKey, SecretKey: cfg.S3SecretKey, UseSSL: cfg.S3UseSSL,
+	})
+	if err != nil {
+		slog.Warn("models bucket unavailable: training evaluation will fail", "error", err)
+	} else {
+		trainingActs.Artifacts = models
+	}
 	trainingWorker := worker.New(tc, temporalpkg.TaskQueueTraining, worker.Options{})
 	trainingWorker.RegisterWorkflow(workflows.TrainingPipelineWorkflow)
 	trainingWorker.RegisterWorkflow(workflows.RetrainingMonitorWorkflow)
-	trainingWorker.RegisterWorkflow(workflows.ModelDeploymentWorkflow) // child workflow for auto-deploy
 	trainingWorker.RegisterActivity(trainingActs)
-	trainingWorker.RegisterActivity(deployActs) // needed for canary child workflow
+	// Auto-deploy canaries run as child workflows on the deployment queue.
 
 	// Start Kafka-Temporal ack bridge (Kafka consumer → Temporal signal)
 	go temporalpkg.AckBridgeKafka(ctx, ackConsumer, tc)

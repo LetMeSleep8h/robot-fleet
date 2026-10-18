@@ -41,13 +41,15 @@ func (m *mockRedis) IncrementUsageCounter(_ context.Context, tenant, metric stri
 	return m.counters[key], nil
 }
 func (m *mockRedis) GetUsageCounter(_ context.Context, _, _, _ string) (int64, error) { return 0, nil }
-func (m *mockRedis) PublishEvent(_ context.Context, _ string, _ []byte) error        { return nil }
-func (m *mockRedis) Subscribe(_ context.Context, _ ...string) *redis.PubSub          { return nil }
-func (m *mockRedis) SetCacheJSON(_ context.Context, _ string, _ []byte, _ time.Duration) error { return nil }
-func (m *mockRedis) GetCacheJSON(_ context.Context, _ string) ([]byte, error)        { return nil, nil }
-func (m *mockRedis) CheckCommandDedup(_ context.Context, _ string) (int64, error)    { return 0, nil }
-func (m *mockRedis) SetCommandDedup(_ context.Context, _ string, _ int64) error      { return nil }
-func (m *mockRedis) Close()                                                           {}
+func (m *mockRedis) PublishEvent(_ context.Context, _ string, _ []byte) error         { return nil }
+func (m *mockRedis) Subscribe(_ context.Context, _ ...string) *redis.PubSub           { return nil }
+func (m *mockRedis) SetCacheJSON(_ context.Context, _ string, _ []byte, _ time.Duration) error {
+	return nil
+}
+func (m *mockRedis) GetCacheJSON(_ context.Context, _ string) ([]byte, error)     { return nil, nil }
+func (m *mockRedis) CheckCommandDedup(_ context.Context, _ string) (int64, error) { return 0, nil }
+func (m *mockRedis) SetCommandDedup(_ context.Context, _ string, _ int64) error   { return nil }
+func (m *mockRedis) Close()                                                       {}
 
 func newAuthenticatedRequest(tenantID string) *http.Request {
 	req := httptest.NewRequest("GET", "/api/v1/robots", nil)

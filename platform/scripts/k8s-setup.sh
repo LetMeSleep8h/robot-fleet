@@ -141,7 +141,8 @@ load_images() {
         "docker.io/bitnami/redis:latest"
         "confluentinc/cp-kafka:7.6.0"
         "confluentinc/cp-zookeeper:7.6.0"
-        "minio/minio:latest"
+        "cgr.dev/chainguard/minio:latest"
+        "cgr.dev/chainguard/minio-client:latest"
         "temporalio/auto-setup:1.25"
         "busybox:1.36"
     )

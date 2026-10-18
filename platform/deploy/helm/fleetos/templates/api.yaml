@@ -99,14 +99,7 @@ spec:
                 secretKeyRef:
                   name: {{ .Release.Name }}-s3-secret
                   key: secret-key
-            - name: TRAINING_ENABLED
-              value: "false"
-            - name: TRAINING_IMAGE
-              value: "fleetos/training:latest"
-            - name: TRAINING_NAMESPACE
-              value: "{{ .Release.Namespace }}"
-            - name: TRAINING_CALLBACK_URL
-              value: "http://{{ .Release.Name }}-api:{{ .Values.api.service.port }}/api/v1/internal"
+            {{- include "fleetos.trainingEnv" . | nindent 12 }}
             - name: RATE_LIMIT_RPS
               value: "100"
             - name: ENVIRONMENT

@@ -19,9 +19,9 @@ type BillingCycleInput struct {
 
 // Signal names for the billing workflow.
 const (
-	SignalChangeTier          = "change-tier"
-	SignalCancelSubscription  = "cancel-subscription"
-	SignalRetryPayment        = "retry-payment"
+	SignalChangeTier         = "change-tier"
+	SignalCancelSubscription = "cancel-subscription"
+	SignalRetryPayment       = "retry-payment"
 )
 
 // ChangeTierSignal is the payload for a tier change signal.

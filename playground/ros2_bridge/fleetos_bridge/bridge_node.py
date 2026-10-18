@@ -40,6 +40,7 @@ JOINT_NAMES = [
     'right_knee', 'right_ankle_pitch', 'right_ankle_roll',
     'right_gripper_left', 'right_gripper_right',
     'left_gripper_left', 'left_gripper_right',
+    'torso_roll',
 ]
 
 

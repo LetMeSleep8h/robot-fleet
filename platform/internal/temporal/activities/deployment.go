@@ -10,18 +10,29 @@ import (
 	"github.com/dimuthu/robot-fleet/internal/store"
 )
 
-// ModelDeployer deploys a model and triggers any necessary pub/sub notifications.
-// This avoids a direct dependency on the service package (which imports temporal/workflows).
-type ModelDeployer interface {
-	DeployModel(ctx context.Context, id string) error
+// ModelPromoter marks a model deployed and publishes the inference hot-swap
+// event. Defined here to avoid importing the service package (which imports
+// temporal/workflows).
+type ModelPromoter interface {
+	PromoteModel(ctx context.Context, id string) error
+}
+
+// RolloutRobots is the subset of robot storage a rollout needs.
+type RolloutRobots interface {
+	ListAllActiveRobots(ctx context.Context, since time.Time, limit int) ([]*store.RobotRecord, error)
+	UpdateRobotInferenceModel(ctx context.Context, robotID, modelID string) error
+	ListRobotsByInferenceModel(ctx context.Context, modelID string) ([]*store.RobotRecord, error)
 }
 
 // DeploymentActivities holds dependencies for model deployment Temporal activities.
 type DeploymentActivities struct {
 	Models       store.ModelRepository
-	Robots       store.RobotRepository
-	ModelService ModelDeployer
+	Robots       RolloutRobots
+	ModelService ModelPromoter
 }
+
+// maxRolloutRobots caps how many active robots one rollout stage touches.
+const maxRolloutRobots = 10000
 
 // StartCanaryOutput is returned by StartCanary.
 type StartCanaryOutput struct {
@@ -113,7 +124,7 @@ func (a *DeploymentActivities) CompareCanaryMetrics(ctx context.Context, input C
 // using deterministic hashing for stable canary bucket selection.
 func (a *DeploymentActivities) ExpandRollout(ctx context.Context, input ExpandRolloutInput) error {
 	since := time.Now().Add(-1 * time.Hour)
-	robots, err := a.Robots.ListAllActiveRobots(ctx, since, 10000)
+	robots, err := a.Robots.ListAllActiveRobots(ctx, since, maxRolloutRobots)
 	if err != nil {
 		return fmt.Errorf("list active robots: %w", err)
 	}
@@ -158,31 +169,29 @@ func (a *DeploymentActivities) RollbackModel(ctx context.Context, input Rollback
 	return nil
 }
 
-// FinalizeDeployment sets the canary to deployed, archives the baseline,
-// and assigns the model to all active robots.
+// FinalizeDeployment promotes the canary to deployed (which tells inference to
+// hot-swap), archives the baseline, and assigns the model to all active robots.
 func (a *DeploymentActivities) FinalizeDeployment(ctx context.Context, input FinalizeInput) error {
-	// Use ModelService to trigger Redis pub/sub for inference hot-swap
-	if a.ModelService != nil {
-		if err := a.ModelService.DeployModel(ctx, input.ModelID); err != nil {
-			return fmt.Errorf("deploy model: %w", err)
-		}
-	} else {
-		if err := a.Models.UpdateModelStatus(ctx, input.ModelID, "deployed"); err != nil {
-			return fmt.Errorf("deploy model: %w", err)
-		}
+	if a.ModelService == nil {
+		return fmt.Errorf("finalize %s: model promoter not configured", input.ModelID)
+	}
+	if err := a.ModelService.PromoteModel(ctx, input.ModelID); err != nil {
+		return fmt.Errorf("promote model %s: %w", input.ModelID, err)
 	}
 	if input.BaselineModelID != "" {
-		_ = a.Models.UpdateModelStatus(ctx, input.BaselineModelID, "archived")
+		if err := a.Models.UpdateModelStatus(ctx, input.BaselineModelID, "archived"); err != nil {
+			slog.Warn("failed to archive baseline model", "baseline", input.BaselineModelID, "error", err)
+		}
 	}
 
-	// Assign deployed model to ALL active robots
 	since := time.Now().Add(-1 * time.Hour)
-	robots, err := a.Robots.ListAllActiveRobots(ctx, since, 10000)
+	robots, err := a.Robots.ListAllActiveRobots(ctx, since, maxRolloutRobots)
 	if err != nil {
-		slog.Error("failed to list robots for finalize", "error", err)
-	} else {
-		for _, r := range robots {
-			_ = a.Robots.UpdateRobotInferenceModel(ctx, r.ID, input.ModelID)
+		return fmt.Errorf("list robots to finalize %s: %w", input.ModelID, err)
+	}
+	for _, r := range robots {
+		if err := a.Robots.UpdateRobotInferenceModel(ctx, r.ID, input.ModelID); err != nil {
+			return fmt.Errorf("assign model %s to robot %s: %w", input.ModelID, r.ID, err)
 		}
 	}
 

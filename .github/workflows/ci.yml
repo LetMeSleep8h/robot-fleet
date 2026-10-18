@@ -5,28 +5,48 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  GO_VERSION: "1.26"
+  PYTHON_VERSION: "3.12"
+  KUBERNETES_VERSION: "1.35.0"
+  KUBECONFORM_VERSION: v0.6.7
+  # CRD schemas (Argo WorkflowTemplate, Katib Experiment, ...) for kubeconform
+  CRD_SCHEMAS: https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/{{.Group}}/{{.ResourceKind}}_{{.ResourceAPIVersion}}.json
 
 jobs:
   lint:
+    name: Go lint (gofmt, vet, build)
     runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: platform
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
-          go-version: "1.26"
-      - name: go vet
-        run: go vet ./...
-      - name: go build
-        run: go build ./...
+          go-version: ${{ env.GO_VERSION }}
+          cache-dependency-path: |
+            platform/go.sum
+            playground/go.sum
+      - name: gofmt
+        run: |
+          unformatted=$( (cd platform && gofmt -l . | grep -v '^internal/telemetry/\|^internal/models/'; cd ../playground && gofmt -l .) || true)
+          if [ -n "$unformatted" ]; then
+            echo "::error::gofmt needed on:"; echo "$unformatted"; exit 1
+          fi
+      - name: platform vet + build
+        working-directory: platform
+        run: go vet ./... && go build ./...
+      - name: playground vet + build
+        working-directory: playground
+        run: go vet ./... && go build ./...
 
   test:
+    name: Go tests (race)
     runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: platform
     services:
       postgres:
         image: postgres:16-alpine
@@ -48,35 +68,169 @@ jobs:
           --health-interval 10s
           --health-timeout 5s
           --health-retries 5
+    env:
+      POSTGRES_DSN: postgres://fleetos:fleetos@localhost:5432/fleetos?sslmode=disable
+      REDIS_ADDR: localhost:6379
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
-          go-version: "1.26"
+          go-version: ${{ env.GO_VERSION }}
+          cache-dependency-path: |
+            platform/go.sum
+            playground/go.sum
       - name: Run migrations
+        working-directory: platform
         run: |
           for f in migrations/*.sql; do
-            psql "$POSTGRES_DSN" -f "$f"
+            psql "$POSTGRES_DSN" -v ON_ERROR_STOP=1 -f "$f"
           done
-        env:
-          POSTGRES_DSN: postgres://fleetos:fleetos@localhost:5432/fleetos?sslmode=disable
-      - name: Run tests
-        env:
-          POSTGRES_DSN: postgres://fleetos:fleetos@localhost:5432/fleetos?sslmode=disable
-          REDIS_ADDR: localhost:6379
-        run: go test -v -race -coverprofile=coverage.out ./...
+      - name: platform tests
+        working-directory: platform
+        run: go test -race -coverprofile=coverage.out ./...
+      - name: playground tests
+        working-directory: playground
+        run: go test -race ./...
       - name: Upload coverage
         uses: codecov/codecov-action@v4
         with:
-          file: platform/coverage.out
+          files: platform/coverage.out
+          fail_ci_if_error: false
+
+  python:
+    name: Python tests (${{ matrix.suite }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - suite: training
+            dir: platform/training
+            requirements: requirements.txt
+            apt: libosmesa6  # MuJoCo software rendering (runners have no EGL)
+          - suite: inference
+            dir: platform/inference
+            requirements: requirements.txt
+          - suite: simulator
+            dir: playground/simulator
+            requirements: requirements.txt
+          - suite: sdk
+            dir: platform/sdk/python
+            requirements: ""
+    defaults:
+      run:
+        working-directory: ${{ matrix.dir }}
+    env:
+      # CPU-only torch wheels (the default index pulls multi-GB CUDA builds)
+      PIP_EXTRA_INDEX_URL: https://download.pytorch.org/whl/cpu
+      MUJOCO_GL: osmesa
+      PYOPENGL_PLATFORM: osmesa
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install system packages
+        if: matrix.apt != ''
+        run: sudo apt-get update -q && sudo apt-get install -y -q ${{ matrix.apt }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: ${{ matrix.dir }}/${{ matrix.requirements || 'test_*.py' }}
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          if [ -n "${{ matrix.requirements }}" ]; then pip install -r "${{ matrix.requirements }}"; fi
+          pip install pytest
+      - name: pytest
+        run: python -m pytest -q
+
+  helm:
+    name: Helm + manifests (lint, render, kubeconform)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: azure/setup-helm@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: false
+      - name: Install kubeconform
+        run: go install "github.com/yannh/kubeconform/cmd/kubeconform@${KUBECONFORM_VERSION}"
+      - name: Build chart dependencies
+        working-directory: platform/deploy/helm/fleetos
+        run: helm dependency build .
+      - name: Lint + render + validate each values profile
+        working-directory: platform/deploy/helm/fleetos
+        run: |
+          set -euo pipefail
+          validate() {
+            "$(go env GOPATH)/bin/kubeconform" -kubernetes-version "$KUBERNETES_VERSION" \
+              -schema-location default -schema-location "$CRD_SCHEMAS" \
+              -ignore-missing-schemas -summary "$@"
+          }
+          for profile in "default:" "local:-f values-local.yaml" "k3s:-f values-local.yaml -f values-k3s.yaml"; do
+            name="${profile%%:*}"; args="${profile#*:}"
+            echo "::group::values profile: $name"
+            # shellcheck disable=SC2086 # args is an intentional word list
+            helm lint . $args
+            # shellcheck disable=SC2086
+            helm template ci . $args > "/tmp/rendered-$name.yaml"
+            validate "/tmp/rendered-$name.yaml"
+            echo "::endgroup::"
+          done
+          # The k3s profile must actually wire up the Kubeflow backend.
+          grep -q 'kind: ClusterTrainingRuntime' /tmp/rendered-k3s.yaml
+          grep -q 'name: KUBEFLOW_ENABLED' /tmp/rendered-k3s.yaml
+          grep -q 'serviceAccountName: ci-worker' /tmp/rendered-k3s.yaml
+          # ...and the default profile must not require Kubeflow CRDs.
+          # (`! grep` would not trip set -e, so test explicitly.)
+          if grep -q 'trainer.kubeflow.org' /tmp/rendered-default.yaml; then
+            echo "::error::default values render Kubeflow resources"; exit 1
+          fi
+      - name: Validate raw Kubernetes manifests (Argo templates, RBAC, secrets)
+        working-directory: platform/deploy/k8s
+        run: |
+          "$(go env GOPATH)/bin/kubeconform" -kubernetes-version "$KUBERNETES_VERSION" \
+            -schema-location default -schema-location "$CRD_SCHEMAS" \
+            -ignore-missing-schemas -summary argo-rbac.yaml training-secrets.yaml workflows/
+
+  shellcheck:
+    name: Shell scripts
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: shellcheck
+        run: shellcheck -S warning start.sh platform/scripts/*.sh .claude/hooks/*.sh
 
   docker-build:
+    name: Docker build (${{ matrix.image }})
     needs: [lint, test]
     runs-on: ubuntu-latest
     strategy:
+      fail-fast: false
       matrix:
-        service: [api, ingestion, processor, worker, inference]
+        include:
+          - image: api
+            context: platform
+            dockerfile: platform/deploy/docker/Dockerfile.api
+          - image: ingestion
+            context: platform
+            dockerfile: platform/deploy/docker/Dockerfile.ingestion
+          - image: processor
+            context: platform
+            dockerfile: platform/deploy/docker/Dockerfile.processor
+          - image: worker
+            context: platform
+            dockerfile: platform/deploy/docker/Dockerfile.worker
+          - image: inference
+            context: platform
+            dockerfile: platform/deploy/docker/Dockerfile.inference
+          - image: training
+            context: platform/training
+            dockerfile: platform/training/Dockerfile
+          - image: simulator
+            context: playground
+            dockerfile: playground/deploy/Dockerfile.simulator
     steps:
       - uses: actions/checkout@v4
-      - name: Build Docker image
-        run: docker build -f platform/deploy/docker/Dockerfile.${{ matrix.service }} -t fleetos/${{ matrix.service }}:ci .
+      - name: Build image
+        run: docker build -f "${{ matrix.dockerfile }}" -t "fleetos/${{ matrix.image }}:ci" "${{ matrix.context }}"

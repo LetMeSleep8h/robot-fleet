@@ -45,12 +45,23 @@ func (s *robotService) RunInference(ctx context.Context, req InferenceRequest, t
 	}
 	inferenceURL := fmt.Sprintf("http://%s/predict", endpoint)
 
-	reqBody, err := json.Marshal(map[string]string{
+	predict := map[string]string{
 		"image":       req.Image,
 		"instruction": req.Instruction,
 		"model_id":    req.ModelID,
 		"embodiment":  req.Embodiment,
-	})
+	}
+	// Pin the request to the model's artifact so canary robots are served by
+	// the canary policy rather than the fleet-wide active one.
+	if req.ModelID != "" && s.models != nil {
+		if m, err := s.models.GetModel(ctx, req.ModelID); err == nil {
+			predict["artifact_url"] = m.ArtifactURL
+			predict["model_version"] = m.Version
+		} else {
+			slog.Warn("assigned model not found, using active model", "model", req.ModelID, "error", err)
+		}
+	}
+	reqBody, err := json.Marshal(predict)
 	if err != nil {
 		return nil, fmt.Errorf("marshal inference request: %w", err)
 	}
@@ -157,8 +168,8 @@ func (s *robotService) forwardInferenceToRobot(ctx context.Context, robotID, ins
 
 	// Legacy fallback: direct Redis pub/sub
 	cmdData, err := json.Marshal(map[string]any{
-		"robot_id": robotID,
-		"command":  map[string]any{"type": cmdType, "params": params},
+		"robot_id":  robotID,
+		"command":   map[string]any{"type": cmdType, "params": params},
 		"issued_at": time.Now().UTC(),
 	})
 	if err != nil {

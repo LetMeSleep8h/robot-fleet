@@ -214,10 +214,10 @@ func main() {
 	}()
 
 	const (
-		s3BatchSize           = 100 // records per robot before S3 flush
+		s3BatchSize           = 100              // records per robot before S3 flush
 		s3FlushInterval       = 30 * time.Second // time-based flush to reduce data loss window
-		telemetryLogInterval  = 500 // log every N packets
-		postgresThrottleRatio = 50  // upsert robot metadata every N packets
+		telemetryLogInterval  = 500              // log every N packets
+		postgresThrottleRatio = 50               // upsert robot metadata every N packets
 		batteryNominalVoltage = 48.0
 	)
 

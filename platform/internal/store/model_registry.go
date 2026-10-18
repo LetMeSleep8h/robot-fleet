@@ -8,14 +8,14 @@ import (
 
 // ModelRecord represents a model in the model registry.
 type ModelRecord struct {
-	ID          string            `json:"id"`
-	Name        string            `json:"name"`
-	Version     string            `json:"version"`
-	ArtifactURL string            `json:"artifact_url"`
-	Status      string            `json:"status"` // staged, canary, deployed, archived
-	Metrics     map[string]any    `json:"metrics"`
-	CreatedAt   time.Time         `json:"created_at"`
-	DeployedAt  *time.Time        `json:"deployed_at,omitempty"`
+	ID          string         `json:"id"`
+	Name        string         `json:"name"`
+	Version     string         `json:"version"`
+	ArtifactURL string         `json:"artifact_url"`
+	Status      string         `json:"status"` // staged, canary, deployed, archived
+	Metrics     map[string]any `json:"metrics"`
+	CreatedAt   time.Time      `json:"created_at"`
+	DeployedAt  *time.Time     `json:"deployed_at,omitempty"`
 }
 
 // RegisterModel inserts a new model into the registry.
@@ -38,7 +38,7 @@ func (s *PostgresStore) GetModel(ctx context.Context, id string) (*ModelRecord, 
 		FROM model_registry WHERE id = $1
 	`, id).Scan(&m.ID, &m.Name, &m.Version, &m.ArtifactURL, &m.Status, &m.Metrics, &m.CreatedAt, &m.DeployedAt)
 	if err != nil {
-		return nil, fmt.Errorf("get model %s: %w", id, err)
+		return nil, fmt.Errorf("get model %s: %w", id, notFoundOr(err))
 	}
 	return m, nil
 }

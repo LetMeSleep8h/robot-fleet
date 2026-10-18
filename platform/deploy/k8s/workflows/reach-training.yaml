@@ -16,6 +16,8 @@ spec:
         value: "1000000"
       - name: batch-size
         value: "256"
+      - name: episodes
+        value: "20"
 
   templates:
     - name: train-and-eval
@@ -50,47 +52,18 @@ spec:
             cpu: "4"
             memory: 4Gi
 
+    # Writes evaluations/<job-id>/eval_results.json (pass_rate, mean_reward)
+    # and calls EVAL_CALLBACK_URL — same contract as the locomotion eval.
     - name: evaluate
-      script:
+      container:
         image: fleetos/training:latest
         imagePullPolicy: Never
-        command: [python]
-        workingDir: /app
-        source: |
-          import os, sys
-          sys.path.insert(0, "/app")
-          from minio import Minio
-          job_id = "{{workflow.parameters.job-id}}"
-          client = Minio(
-              os.environ["S3_ENDPOINT"],
-              access_key=os.environ["S3_ACCESS_KEY"],
-              secret_key=os.environ["S3_SECRET_KEY"],
-              secure=False,
-          )
-          # Download trained model from S3
-          os.makedirs("/tmp/eval_model", exist_ok=True)
-          client.fget_object(
-              os.environ["S3_BUCKET"],
-              f"training/{job_id}/policy.zip",
-              "/tmp/eval_model/policy.zip",
-          )
-          print(f"[eval] Downloaded model for {job_id}")
-          # Run evaluation
-          sys.argv = [
-              "evaluate_reach.py",
-              "--model-path", "/tmp/eval_model/policy",
-              "--episodes", "20",
-              "--output-dir", "/tmp/eval",
-          ]
-          exec(open("evaluate_reach.py").read())
-          # Upload results
-          for f in os.listdir("/tmp/eval"):
-              client.fput_object(
-                  os.environ["S3_BUCKET"],
-                  f"training/{job_id}/eval_{f}",
-                  f"/tmp/eval/{f}",
-              )
-              print(f"[eval] Uploaded eval_{f}")
+        command: [python, evaluate_reach.py]
+        args:
+          - "--eval-id={{workflow.parameters.job-id}}"
+          - "--model-path=s3://fleetos-models/training/{{workflow.parameters.job-id}}/policy.zip"
+          - "--episodes={{workflow.parameters.episodes}}"
+          - "--output-dir=/tmp/eval"
         envFrom:
           - secretRef:
               name: fleetos-training
