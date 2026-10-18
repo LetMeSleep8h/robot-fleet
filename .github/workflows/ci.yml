@@ -107,6 +107,7 @@ jobs:
           - suite: training
             dir: platform/training
             requirements: requirements.txt
+            apt: libosmesa6  # MuJoCo software rendering (runners have no EGL)
           - suite: inference
             dir: platform/inference
             requirements: requirements.txt
@@ -122,9 +123,13 @@ jobs:
     env:
       # CPU-only torch wheels (the default index pulls multi-GB CUDA builds)
       PIP_EXTRA_INDEX_URL: https://download.pytorch.org/whl/cpu
-      MUJOCO_GL: egl
+      MUJOCO_GL: osmesa
+      PYOPENGL_PLATFORM: osmesa
     steps:
       - uses: actions/checkout@v4
+      - name: Install system packages
+        if: matrix.apt != ''
+        run: sudo apt-get update -q && sudo apt-get install -y -q ${{ matrix.apt }}
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ env.PYTHON_VERSION }}
