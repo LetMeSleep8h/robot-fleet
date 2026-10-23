@@ -7,7 +7,8 @@ A distributed robot fleet management platform built on a **cloud-brain architect
 - **Real-time Telemetry Pipeline** -- Humanoid robots stream 20-DOF joint states, LiDAR, video, and audio over gRPC into Kafka, processed into Redis (hot state) + S3 (raw storage)
 - **Developer API Platform** -- REST, WebSocket, and gRPC APIs with OpenAPI 3.1 spec, TypeScript + Python SDKs
 - **Multi-tenant Auth & Billing** -- JWT + OAuth2/OIDC + API key authentication, RBAC (4 roles), per-tenant rate limiting, usage metering, 3-tier pricing (free/pro/enterprise)
-- **AI Inference** -- SB3 PPO/SAC policy serving with instruction bias, loads models from S3/MinIO, hot-swaps on deployment
+- **Edge policy execution** -- robots run their assigned walking policy locally every control tick (the timing it was trained at); the platform decides which model via `GET /api/v1/robots/{id}/policy` (canary assignment, else the deployed fleet model)
+- **AI Inference** -- SB3 PPO/SAC policy serving for API requests and non-locomotion commands; applies each model's observation normalisation; instruction bias only for the zero-action stub; loads models from S3/MinIO, hot-swaps on deployment
 - **Durable Command Pipeline** -- Commands published to Kafka (`robot.commands`), consumed by processor, orchestrated via Temporal workflows with audit trail, ack tracking, retries, and timeout handling
 - **Semantic Commands** -- Natural language robot control via extensible command registry (strategy pattern), with FAISS-backed resolution for unmatched instructions (searches fleet state to resolve spatial commands like "go where the idle robots are")
 - **Model Registry** -- Model lifecycle management (staged -> canary -> deployed -> archived) with S3 artifact storage, canary deployment via Temporal workflows
@@ -147,6 +148,7 @@ open http://localhost:8123   # ClickHouse (direct SQL)
 | `GET` | `/api/v1/robots/{id}` | Get robot (hot state + inference_model_id) |
 | `POST` | `/api/v1/robots/{id}/command` | Send command → Kafka → Temporal workflow |
 | `GET` | `/api/v1/robots/{id}/commands` | Command history with audit trail |
+| `GET` | `/api/v1/robots/{id}/policy` | Policy the robot should run locally (canary assignment, else deployed fleet model; 404 if none) |
 | `POST` | `/api/v1/inference` | AI inference (uses robot's assigned model) |
 | `GET` | `/api/v1/fleet/metrics` | Aggregated fleet stats |
 | `POST` | `/api/v1/models` | Register model (staged) |
@@ -239,7 +241,8 @@ Instruction ("wave hello") + Optional observation (376-dim MuJoCo state)
     |
 SB3 PPO Policy -- predict() → 17-dim MuJoCo action vector
     |
-Instruction Bias -- overlay command-specific joint targets (wave, dance, walk...)
+Instruction Bias -- only when no trained model is loaded (zero-action stub);
+                    a learned policy's actions are returned unmodified
     |
 MuJoCo-to-Fleet Mapping -- 17 actuators → 20 joint schema
     |

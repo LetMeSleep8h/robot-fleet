@@ -243,3 +243,96 @@ def test_artifact_cache_path_is_per_artifact_and_not_model_path():
     b = server._artifact_cache_path("training/b/policy.zip")
     assert a != b
     assert a != str(server.MODEL_PATH)
+
+
+# ─── Observation normalization (VecNormalize stats) ────────────
+
+def test_normalize_obs_matches_vecnormalize_formula():
+    obs = np.array([1.0, 10.0, -50.0], dtype=np.float32)
+    mean = np.array([0.0, 4.0, 0.0])
+    var = np.array([1.0, 9.0, 1.0])
+    out = server.normalize_obs(obs, mean, var, clip_obs=10.0, epsilon=1e-8)
+    assert out[0] == pytest.approx(1.0, rel=1e-5)
+    assert out[1] == pytest.approx(2.0, rel=1e-5)
+    assert out[2] == pytest.approx(-10.0)  # clipped
+    assert out.dtype == np.float32
+
+
+def _write_vecnormalize(path, mean, var, clip_obs=10.0, epsilon=1e-8):
+    import pickle
+    stats = types.SimpleNamespace(
+        obs_rms=types.SimpleNamespace(mean=np.asarray(mean, dtype=np.float64), var=np.asarray(var, dtype=np.float64)),
+        clip_obs=clip_obs, epsilon=epsilon)
+    with open(path, "wb") as f:
+        pickle.dump(stats, f)
+
+
+def test_load_obs_normalizer_reads_pickle(tmp_path):
+    p = tmp_path / "vec_normalize.pkl"
+    _write_vecnormalize(p, [1.0, 2.0], [4.0, 9.0], clip_obs=5.0)
+    norm = server.load_obs_normalizer(str(p))
+    out = norm(np.array([3.0, 8.0], dtype=np.float32))
+    assert out == pytest.approx([1.0, 2.0], rel=1e-5)
+
+
+def test_load_obs_normalizer_missing_file_is_none(tmp_path):
+    assert server.load_obs_normalizer(str(tmp_path / "nope.pkl")) is None
+
+
+def test_load_policy_file_wraps_with_sibling_normalizer(fake_sb3, tmp_path):
+    seen = {}
+
+    class Recording:
+        observation_space = None
+
+        def predict(self, obs, deterministic=False):
+            seen["obs"] = np.array(obs)
+            return np.zeros(server.MUJOCO_ACTION_DIM, dtype=np.float32), None
+
+    fake_sb3.PPO.load.return_value = Recording()
+    _write_vecnormalize(tmp_path / "vec_normalize.pkl", [1.0, 1.0], [4.0, 4.0])
+
+    policy = server.load_policy_file(str(tmp_path / "policy"))
+    policy.predict(np.array([3.0, 5.0], dtype=np.float32), deterministic=True)
+    assert seen["obs"] == pytest.approx([1.0, 2.0], rel=1e-5)
+
+
+def test_load_policy_file_without_normalizer_is_unwrapped(fake_sb3, tmp_path):
+    model = object()
+    fake_sb3.PPO.load.return_value = model
+    assert server.load_policy_file(str(tmp_path / "policy")) is model
+
+
+def test_normalizer_path_is_sibling_of_policy():
+    assert server.normalizer_path("/m/cache/abc/policy") == "/m/cache/abc/vec_normalize.pkl"
+    assert server.normalizer_path("/m/humanoid-v4-ppo.zip") == "/m/vec_normalize.pkl"
+    assert server.normalizer_key("training/job-1/policy.zip") == "training/job-1/vec_normalize.pkl"
+    assert server.normalizer_key("s3://b/training/job-1/policy.zip") == "training/job-1/vec_normalize.pkl"
+
+
+# ─── Instruction bias only for the stub ─────────────────────────
+
+def test_learned_policy_actions_are_not_biased(active_model):
+    result = server.run_inference(None, "wave hello", "", "humanoid-v4")
+    assert result["bias_applied"] is False
+    assert result["action"] == pytest.approx([0.0] * server.MUJOCO_ACTION_DIM)
+
+
+def test_stub_policy_actions_are_biased(active_model, monkeypatch):
+    monkeypatch.setattr(server, "_policy", server._StubPolicy())
+    result = server.run_inference(None, "wave hello", "", "humanoid-v4")
+    assert result["bias_applied"] is True
+    assert any(abs(a) > 0 for a in result["action"])
+
+
+def test_inference_predicts_deterministically_like_evaluation(active_model, monkeypatch):
+    calls = []
+
+    class Recording(FakePolicy):
+        def predict(self, obs, deterministic=False):
+            calls.append(deterministic)
+            return super().predict(obs, deterministic)
+
+    monkeypatch.setattr(server, "_policy", Recording(0.1))
+    server.run_inference(None, "walk", "", "humanoid-v4")
+    assert calls == [True]

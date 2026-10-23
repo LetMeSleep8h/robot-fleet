@@ -17,13 +17,12 @@ from gymnasium import spaces
 from gymnasium.envs.registration import register
 
 from observation import build_observation_from_mujoco, OBS_DIM, NUM_ACTUATORS
+from locomotion_reward import control_cost, has_fallen, locomotion_reward
 
 ASSETS_DIR = Path(__file__).parent / "assets"
 LAB_XML = ASSETS_DIR / "lab_room.xml"
 
 N_SUBSTEPS = 7  # 0.003s × 7 = 0.021s per step
-CTRL_COST_WEIGHT = 0.1
-FALL_Z = 0.3
 
 
 class FleetOSHumanoidEnv(gym.Env):
@@ -108,14 +107,11 @@ class FleetOSHumanoidEnv(gym.Env):
         forward_velocity = (x_pos - self._prev_x) / dt
         self._prev_x = x_pos
 
-        ctrl_cost = CTRL_COST_WEIGHT * float(np.sum(action ** 2))
-
-        if height < FALL_Z:
-            reward = -10.0
-        else:
-            reward = forward_velocity + 1.0 - ctrl_cost
-
-        terminated = height < FALL_Z
+        ctrl_cost = control_cost(action)
+        # Shared with the robots (locomotion_reward.py) so the test track
+        # scores and terminates exactly like the fleet.
+        reward = locomotion_reward(forward_velocity, height, ctrl_cost)
+        terminated = has_fallen(height)
         truncated = self._step_count >= self._max_episode_steps
 
         info = {

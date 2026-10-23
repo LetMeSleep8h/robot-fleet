@@ -39,7 +39,7 @@ All Go platform code lives under `platform/`. The Go module root is `platform/go
 ```
 
 Services:
-- **simulator** (`playground/simulator/`) — MuJoCo physics (Python), sends telemetry (incl. training context: 86-dim obs, action, reward, episode/step, exploration) via gRPC, receives commands via gRPC
+- **simulator** (`playground/simulator/`) — MuJoCo physics (Python), sends telemetry (incl. training context: 86-dim obs, action, reward, episode/step, exploration) via gRPC, receives commands via gRPC; runs its assigned locomotion policy locally every control tick (edge execution, policy chosen by the platform via `GET /api/v1/robots/{id}/policy`)
 - **ingestion** (`platform/cmd/ingestion/`) — gRPC server → Kafka producer; consumes `robot.commands.dispatch` from Kafka → gRPC StreamCommands
 - **api** (`platform/cmd/api/`) — REST API + WebSocket + auth + rate limiting + billing; serves the admin console at `/admin/`
 - **processor** (`platform/cmd/processor/`) — Kafka consumer → Postgres/Redis/S3/ClickHouse; starts Temporal command workflows
@@ -270,6 +270,7 @@ python3 train_locomotion.py --job-id demo --timesteps 50000 \
 - Model versions are stored with `artifact_url` (S3 path), `metrics` (JSONB), and deployment timestamps.
 - The inference service loads models from S3 via the registry API; API inference requests carry the robot's assigned `artifact_url` (canary routing).
 - Promotion is gated (`internal/modelgate`): `POST /models/{id}/deploy` rejects unevaluated/failing models (422) and otherwise starts the Temporal canary (`ModelDeploymentWorkflow`); only its final step (`PromoteModel`) marks a model deployed.
+- Train/serve parity: robots and the test track share `observation.py`, `locomotion_reward.py` and `assets/lab_room.xml` (byte-identical copies in `platform/training/` and `playground/simulator/`, enforced by `platform/training/test_parity.py`). Change both copies together.
 - Pipeline-trained models record their data lineage in `metrics` (`dataset_manifest`, `dataset_files`): the exact fleet-experience batches (`datasets/<job>/manifest.json`) they were trained on.
 
 ### SDK Requirements

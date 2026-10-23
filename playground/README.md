@@ -151,3 +151,10 @@ A deterministic fraction of robots (`EXPLORATION_FRACTION`, default 0.2) adds Ga
 | `EXPLORATION_FRACTION` | 0.2 | Share of robots (chosen deterministically by ID) that add exploration noise |
 | `EXPLORATION_STD` | 0.1 | Std of the per-dimension Gaussian exploration noise |
 | `INFERENCE_URL` | http://inference:8081 | Inference service URL (use http://host.docker.internal:30081 for k8s) |
+| `EDGE_POLICY` | true | Run the assigned policy locally every control tick for locomotion tasks |
+| `EDGE_POLICY_TASKS` | walk,move,move_relative | Tasks served by the local policy (others use cloud inference) |
+| `PLATFORM_API_URL` | http://api:8080 | Platform API; robots poll `GET /api/v1/robots/{id}/policy` |
+| `PLATFORM_API_KEY` | dev-key-002 | API key for the policy endpoint |
+| `POLICY_REFRESH_S` | 10 | Seconds between policy-assignment checks |
+| `S3_ENDPOINT` / `S3_ACCESS_KEY` / `S3_SECRET_KEY` | minio:9000 / fleetos / fleetos123 | Where robots download their assigned model artifact |
+| `MODELS_BUCKET` | fleetos-models | Bucket holding model artifacts |

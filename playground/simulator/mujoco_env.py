@@ -13,6 +13,8 @@ from pathlib import Path
 import mujoco
 import numpy as np
 
+from locomotion_reward import FALL_PENALTY, control_cost, has_fallen, locomotion_reward
+
 from joint_mapping import extract_joint_states, extract_root_pose, MUJOCO_QPOS_OFFSET
 
 log = logging.getLogger(__name__)
@@ -336,17 +338,17 @@ class LabSimulation:
             cmd = task_commands.get(robot["id"], "idle")
 
             ctrl = self.data.ctrl[acts:acts + NUM_ACTUATORS]
-            control_cost = 0.1 * float(np.sum(ctrl ** 2))
+            ctrl_cost = control_cost(ctrl)
 
-            reward = self._compute_reward(robot, cmd, height, x_pos, dt, control_cost)
+            reward = self._compute_reward(robot, cmd, height, x_pos, dt, ctrl_cost)
             robot["prev_x"] = x_pos
             robot["reward_accum"] += reward
             robot["cum_reward"] += reward
             robot["episode_steps"] += 1
             robot["total_steps"] += 1
 
-            # Fall detection and reset
-            if height < 0.3:
+            # Fall detection and reset (same rule as the training env)
+            if has_fallen(height):
                 robot["fall_count"] += 1
                 robot["episode_count"] += 1
                 robot["total_reward"] += robot["reward_accum"]
@@ -363,7 +365,7 @@ class LabSimulation:
                 robot["status"] = "active"
 
     def _compute_reward(self, robot: dict, cmd: str, height: float,
-                        x_pos: float, dt: float, control_cost: float) -> float:
+                        x_pos: float, dt: float, ctrl_cost: float) -> float:
         """Task-conditional reward.
 
         Different commands get different reward signals:
@@ -373,32 +375,32 @@ class LabSimulation:
         - wave/dance/bow/etc: small reward for staying upright during gesture
         """
         # Penalty for falling applies to all tasks
-        if height < 0.4:
-            return -10.0
+        if has_fallen(height):
+            return FALL_PENALTY
 
         if cmd in ("move", "move_relative", "walk"):
-            # Locomotion: reward forward movement
+            # Locomotion: identical to the training env / test track
             forward_vel = (x_pos - robot["prev_x"]) / dt if dt > 0 else 0.0
-            return forward_vel + 1.0 - control_cost  # reduced alive bonus (1.0 vs old 5.0)
+            return locomotion_reward(forward_vel, height, ctrl_cost)
 
         if cmd in ("reach", "pick_up", "grasp"):
             # Manipulation: reward hand-object proximity
             hand_dist = self._hand_object_distance(robot)
             if hand_dist is not None:
-                return -hand_dist - 0.1 * control_cost  # closer = better
-            return -1.0 - 0.1 * control_cost
+                return -hand_dist - 0.1 * ctrl_cost  # closer = better
+            return -1.0 - 0.1 * ctrl_cost
 
         if cmd in ("wave", "dance", "bow", "sit", "jump", "stretch", "look_around"):
             # Gesture: small reward for staying upright, no free points
             upright = 1.0 if height > 0.8 else 0.0
-            return upright * 0.5 - control_cost
+            return upright * 0.5 - ctrl_cost
 
         if cmd in ("idle", "stop"):
             # Idle: no reward. Robot should not be rewarded for standing still.
-            return -0.01 - 0.1 * control_cost
+            return -0.01 - 0.1 * ctrl_cost
 
         # Unknown command: small negative to discourage doing nothing
-        return -0.01 - control_cost
+        return -0.01 - ctrl_cost
 
     def _hand_object_distance(self, robot: dict) -> float | None:
         """Distance from right hand site to nearest dynamic object site."""

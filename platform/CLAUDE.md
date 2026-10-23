@@ -236,6 +236,7 @@ make k3s-down      # colima stop (MinIO PVC survives)
 - Model versions are stored with `artifact_url` (S3 path), `metrics` (JSONB), and deployment timestamps.
 - The inference service loads models from S3 via the registry API; API inference requests carry the robot's assigned `artifact_url` (canary routing).
 - Promotion is gated (`internal/modelgate`): `POST /models/{id}/deploy` rejects unevaluated/failing models (422) and otherwise starts the Temporal canary (`ModelDeploymentWorkflow`); only its final step (`PromoteModel`) marks a model deployed.
+- Train/serve parity: robots and the test track share `observation.py`, `locomotion_reward.py` and `assets/lab_room.xml` (byte-identical copies in `platform/training/` and `playground/simulator/`, enforced by `platform/training/test_parity.py`). Change both copies together.
 - Pipeline-trained models record their data lineage in `metrics` (`dataset_manifest`, `dataset_files`): the exact fleet-experience batches (`datasets/<job>/manifest.json`) they were trained on.
 
 ### SDK Requirements

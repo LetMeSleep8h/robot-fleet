@@ -184,7 +184,8 @@ Simulator (50 Hz) → gRPC Telemetry (+ training context) → Ingestion → Kafk
 |-----|--------|-------------------|
 | **Small HPO budget** | Katib defaults to 4 trials × 2,000 offline updates + 5 test-track episodes — enough to exercise the loop, not to find good parameters | Raise `kubeflow.hpo.maxTrials` / `trialGradientSteps` / `evalEpisodes` on real hardware; add net_arch to the search space |
 | **Offline updates are heavier, not lighter** | Measured: same 3,200 gradient updates took 51 s online (PPO) vs 100 s offline (CQL) on a 2–4 CPU pod | Benefits are data reuse, lineage and no sim-to-real gap — budget compute accordingly (GPU for CQL at scale) |
-| **Inference ignores VecNormalize for PPO models** | `vec_normalize.pkl` from manual PPO runs isn't applied at inference (pipeline CQL models use raw observations, so they're unaffected) | Load the stats alongside each PPO policy in the inference cache |
+| ~~**Inference ignores VecNormalize for PPO models**~~ ✅ fixed | Robots (edge) and the inference service now apply each model's `vec_normalize.pkl` when present | — |
+| **Offline transitions are 10 Hz samples of a 47.6 Hz controller** | With edge execution the action changes every control tick, but records sample it every telemetry interval | Record at control rate (batched) or execute offline models with matching action repeat |
 | **Rewards come from the simulator** | Real robots don't compute `forward_vel + alive - ctrl_cost` | Derive rewards from telemetry in the processor |
 | **No experiment tracking** | Can't compare runs side-by-side | Integrate MLflow or W&B; log to existing S3 backend |
 | **No curriculum learning** | Policy trains on single difficulty | Progressive env configs: gravity, friction, wind ramp over training |

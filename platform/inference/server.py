@@ -412,6 +412,16 @@ def _download_model_from_s3(artifact_url: str = "", zip_path: str | None = None)
         Path(zip_path).parent.mkdir(parents=True, exist_ok=True)
         client.fget_object(S3_BUCKET, s3_key, zip_path)
         log.info("[Model] Downloaded from s3://%s/%s", S3_BUCKET, s3_key)
+        # Normalization stats are optional (offline models have none).
+        norm_local = normalizer_path(zip_path)
+        if os.path.exists(norm_local):
+            os.remove(norm_local)  # never pair a new policy with stale stats
+        try:
+            client.fget_object(S3_BUCKET, normalizer_key(s3_key), norm_local)
+            log.info("[Model] Downloaded normalization stats %s", normalizer_key(s3_key))
+        except Exception as norm_err:
+            log.info("[Model] No normalization stats for %s (%s) — serving raw observations",
+                     s3_key, norm_err)
         return True
     except ImportError:
         log.warning("[Model] minio package not installed — cannot download from S3")
@@ -419,6 +429,57 @@ def _download_model_from_s3(artifact_url: str = "", zip_path: str | None = None)
     except Exception as e:
         log.warning("[Model] Could not download model from S3: %s", e)
         return False
+
+
+# ─── Observation normalization ──────────────────────────────────
+# PPO policies are trained behind VecNormalize; serving must feed them
+# observations scaled exactly as in training. The stats ship next to the
+# policy as vec_normalize.pkl (offline CQL models have none: raw obs).
+
+NORMALIZER_FILE = "vec_normalize.pkl"
+
+
+def normalize_obs(obs, mean, var, clip_obs: float, epsilon: float) -> np.ndarray:
+    """VecNormalize's observation transform: clip((obs - mean) / sqrt(var + eps))."""
+    out = (np.asarray(obs, dtype=np.float64) - mean) / np.sqrt(var + epsilon)
+    return np.clip(out, -clip_obs, clip_obs).astype(np.float32)
+
+
+def normalizer_path(policy_path: str) -> str:
+    """Local vec_normalize.pkl that belongs to a policy file (same directory)."""
+    return str(Path(policy_path).parent / NORMALIZER_FILE)
+
+
+def normalizer_key(artifact_url: str) -> str:
+    """S3 key of the vec_normalize.pkl uploaded alongside an artifact."""
+    key = _parse_s3_key(artifact_url)
+    return str(Path(key).parent / NORMALIZER_FILE)
+
+
+def load_obs_normalizer(path: str):
+    """Return obs -> normalized obs from a saved VecNormalize, or None if absent."""
+    if not os.path.exists(path):
+        return None
+    import pickle
+    with open(path, "rb") as f:
+        vec = pickle.load(f)  # trusted: written by our own training jobs
+    mean, var = np.asarray(vec.obs_rms.mean), np.asarray(vec.obs_rms.var)
+    clip_obs, epsilon = float(vec.clip_obs), float(vec.epsilon)
+    return lambda obs: normalize_obs(obs, mean, var, clip_obs, epsilon)
+
+
+class NormalizedPolicy:
+    """Wraps a policy so predict() sees training-scaled observations."""
+
+    def __init__(self, policy, normalize):
+        self._policy = policy
+        self._normalize = normalize
+        self.observation_space = getattr(policy, "observation_space", None)
+
+    def predict(self, obs, deterministic=False):
+        if isinstance(obs, dict):  # goal-conditioned policies aren't trained behind VecNormalize
+            return self._policy.predict(obs, deterministic=deterministic)
+        return self._policy.predict(self._normalize(obs), deterministic=deterministic)
 
 
 class _StubPolicy:
@@ -439,6 +500,15 @@ def load_policy_file(path: str):
     Locomotion policies are PPO; reach/grasp policies are SAC (+HER). The zip
     doesn't say which, so try PPO first and fall back to SAC.
     """
+    model = _load_sb3(path)
+    normalize = load_obs_normalizer(normalizer_path(path))
+    if normalize is not None:
+        log.info("[Model] Applying observation normalization from %s", normalizer_path(path))
+        return NormalizedPolicy(model, normalize)
+    return model
+
+
+def _load_sb3(path: str):
     from stable_baselines3 import PPO, SAC
 
     try:
@@ -711,9 +781,10 @@ def run_inference(observation: list | None, instruction: str, model_id: str, emb
         obs = get_default_observation()
 
     # Run policy
+    served_policy = policy
     try:
         with policy_lock:
-            raw_action, _states = policy.predict(build_policy_obs(policy, obs, goal), deterministic=False)
+            raw_action, _states = policy.predict(build_policy_obs(policy, obs, goal), deterministic=True)
     except Exception as exc:
         if policy is _policy:
             raise
@@ -723,17 +794,22 @@ def run_inference(observation: list | None, instruction: str, model_id: str, emb
                     model_id, exc)
         model_id, model_version = _active_model.snapshot()
         fallback = True
+        served_policy = _policy
         with _policy_lock:
-            raw_action, _states = _policy.predict(build_policy_obs(_policy, obs, goal), deterministic=False)
+            raw_action, _states = _policy.predict(build_policy_obs(_policy, obs, goal), deterministic=True)
 
     raw_action = np.asarray(raw_action, dtype=np.float32)
     log.info("  [Policy] Raw action (17-dim): mean=%.3f, std=%.3f, range=[%.3f, %.3f]",
              raw_action.mean(), raw_action.std(), raw_action.min(), raw_action.max())
 
-    # Apply instruction bias
-    biased_action = apply_instruction_bias(raw_action, instruction)
-    log.info("  [Bias] After instruction bias: mean=%.3f, std=%.3f",
-             biased_action.mean(), biased_action.std())
+    # Instruction bias only makes the zero-action stub responsive; a learned
+    # policy's actions are served unmodified (biasing them breaks its gait).
+    bias_applied = isinstance(served_policy, _StubPolicy)
+    if bias_applied:
+        biased_action = apply_instruction_bias(raw_action, instruction)
+        log.info("  [Bias] Stub policy: instruction bias applied")
+    else:
+        biased_action = np.clip(raw_action, -1.0, 1.0)
 
     # Convert to fleet joint schema
     predicted_actions = mujoco_to_fleet_actions(biased_action)
@@ -755,6 +831,7 @@ def run_inference(observation: list | None, instruction: str, model_id: str, emb
         "action_dim": MUJOCO_ACTION_DIM,
         "latency_ms": round(total_ms, 1),
         "fallback": fallback,
+        "bias_applied": bias_applied,
     }
 
 
