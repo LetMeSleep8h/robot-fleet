@@ -18,6 +18,17 @@ def test_upright_reward_is_progress_plus_alive_minus_effort():
     assert lr.locomotion_reward(1.2, 1.1, cost) == 1.2 + lr.ALIVE_BONUS - cost
 
 
-def test_low_but_upright_robot_is_not_penalised():
-    # Between the old simulator threshold (0.4) and FALL_Z the robot hasn't fallen.
-    assert lr.locomotion_reward(0.0, 0.35, 0.0) == lr.ALIVE_BONUS
+CROUCH_HEIGHT = 0.57    # torso height of the crawl gait a 0.3 m fall rule let PPO learn
+STANDING_HEIGHT = 1.22  # spawn torso height (feet on the floor)
+
+
+def test_crouching_counts_as_a_fall():
+    # With a 0.3 m rule PPO learned to crawl at torso 0.57 m: alive bonus without
+    # balancing. A crouch must end the episode like a fall.
+    assert lr.has_fallen(CROUCH_HEIGHT)
+    assert lr.locomotion_reward(1.0, CROUCH_HEIGHT, 0.0) == lr.FALL_PENALTY
+
+
+def test_standing_robot_has_not_fallen():
+    assert not lr.has_fallen(STANDING_HEIGHT)
+    assert lr.FALL_Z < STANDING_HEIGHT, "robots would count as fallen the moment they spawn"

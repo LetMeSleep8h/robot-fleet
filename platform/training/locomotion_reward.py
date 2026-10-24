@@ -8,7 +8,7 @@ judged fairly if robots score and terminate exactly as it was trained.
 
 import numpy as np
 
-FALL_Z = 0.3            # torso height below which the robot has fallen (episode ends)
+FALL_Z = 1.0            # torso height (m) below which the robot has fallen; a crouch counts (Gymnasium Humanoid)
 FALL_PENALTY = -10.0
 ALIVE_BONUS = 1.0
 CTRL_COST_WEIGHT = 0.1
