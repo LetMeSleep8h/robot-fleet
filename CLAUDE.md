@@ -109,9 +109,10 @@ cd platform && make k3s-down      # colima stop (MinIO PVC survives)
 #   Prometheus:     http://localhost:30090
 #   API:            http://localhost:30880
 
-# Train locally (faster for dev iteration)
+# Train locally (faster for dev iteration); --n-envs 8 ≈ 3× the single-env speed on 8+ cores.
+# metrics.json carries a learning curve ("history"); final eval reward is raw test-track reward.
 cd platform/training
-python3 train_locomotion.py --job-id demo --timesteps 50000 \
+python3 train_locomotion.py --job-id demo --timesteps 50000 --n-envs 8 --n-steps 512 \
   --env-id FleetOS-Humanoid-v2 --s3-endpoint localhost:9000
 ```
 

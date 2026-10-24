@@ -27,6 +27,7 @@ Usage:
 """
 
 import argparse
+import copy
 import json
 import os
 import sys
@@ -39,46 +40,69 @@ from policy_meta import write_policy_meta
 from stable_baselines3 import PPO
 from stable_baselines3.common.callbacks import BaseCallback
 from stable_baselines3.common.evaluation import evaluate_policy
-from stable_baselines3.common.vec_env import DummyVecEnv, VecNormalize
+from stable_baselines3.common.monitor import Monitor
+from stable_baselines3.common.vec_env import DummyVecEnv, SubprocVecEnv, VecEnv, VecNormalize
 
 # Register our custom environment
 from fleetos_env import register_fleetos_env
 register_fleetos_env()
 
 
+METRICS_FLUSH_EPISODES = 100  # write metrics.json + a learning-curve point this often
+METRICS_WINDOW_EPISODES = 100  # episodes averaged into mean_reward / mean_length
+
+
 class MetricsCallback(BaseCallback):
     """Logs training metrics to a JSON file for the platform to consume."""
 
-    def __init__(self, metrics_path: str, verbose=0):
+    def __init__(self, metrics_path: str, verbose=0, flush_every: int = METRICS_FLUSH_EPISODES):
         super().__init__(verbose)
         self.metrics_path = metrics_path
+        self.flush_every = flush_every
         self.metrics = {
             "episode_rewards": [],
             "episode_lengths": [],
             "timestamps": [],
         }
+        self.history = []  # learning curve: one point per flush
+        self._start = time.time()
 
     def _on_step(self) -> bool:
-        if len(self.model.ep_info_buffer) > 0:
-            ep_info = self.model.ep_info_buffer[-1]
+        # Monitor puts an "episode" entry in an env's info on the step its
+        # episode ends; record each finished episode exactly once.
+        for info in self.locals.get("infos", []):
+            ep_info = info.get("episode")
+            if ep_info is None:
+                continue
             self.metrics["episode_rewards"].append(float(ep_info["r"]))
             self.metrics["episode_lengths"].append(int(ep_info["l"]))
             self.metrics["timestamps"].append(time.time())
-
-            if len(self.metrics["episode_rewards"]) % 100 == 0:
+            if len(self.metrics["episode_rewards"]) % self.flush_every == 0:
                 self._flush()
         return True
 
     def _flush(self):
         rewards = self.metrics["episode_rewards"]
         lengths = self.metrics["episode_lengths"]
+        recent = slice(-METRICS_WINDOW_EPISODES, None)
         summary = {
             "total_episodes": len(rewards),
-            "mean_reward": float(np.mean(rewards[-100:])) if rewards else 0.0,
-            "mean_length": float(np.mean(lengths[-100:])) if lengths else 0.0,
+            "mean_reward": float(np.mean(rewards[recent])) if rewards else 0.0,
+            "mean_length": float(np.mean(lengths[recent])) if lengths else 0.0,
             "max_reward": float(np.max(rewards)) if rewards else 0.0,
             "total_timesteps": self.num_timesteps,
         }
+        if not self.history or self.history[-1]["timesteps"] != self.num_timesteps:
+            self.history.append({
+                "timesteps": self.num_timesteps,
+                "elapsed_seconds": round(time.time() - self._start, 1),
+                "mean_reward": round(summary["mean_reward"], 2),
+                "mean_length": round(summary["mean_length"], 1),
+            })
+            print(f"[train] steps={self.num_timesteps} episodes={len(rewards)} "
+                  f"mean_reward={summary['mean_reward']:.2f} mean_length={summary['mean_length']:.1f}",
+                  flush=True)
+        summary["history"] = self.history
         with open(self.metrics_path, "w") as f:
             json.dump(summary, f, indent=2)
 
@@ -86,11 +110,40 @@ class MetricsCallback(BaseCallback):
         self._flush()
 
 
+TRAIN_SEED = 0
+FINAL_EVAL_EPISODES = 20
+
+
 def make_env(env_id: str):
     """Create environment — supports both custom and stock Gymnasium."""
     def _init():
-        return gym.make(env_id)
+        if env_id not in gym.registry:  # fresh worker process
+            register_fleetos_env()
+        return Monitor(gym.make(env_id))  # episode reward/length for training metrics
     return _init
+
+
+def build_vec_env(env_id: str, n_envs: int) -> VecEnv:
+    """n_envs copies of the env: in-process for one, one worker process each
+    otherwise (MuJoCo steps on the CPU, so parallel envs scale with cores).
+    Workers get different seeds so their episodes don't run in lockstep."""
+    factories = [make_env(env_id) for _ in range(n_envs)]
+    env = DummyVecEnv(factories) if n_envs == 1 else SubprocVecEnv(factories)
+    env.seed(TRAIN_SEED)
+    return env
+
+
+def make_eval_env(env_id: str, train_env: VecNormalize) -> VecNormalize:
+    """Single test-track env with a frozen copy of the training normalizer.
+
+    Scores raw episode reward, the same units as evaluate_policy.py and the
+    promotion gate; evaluating on the training env reported normalized reward
+    and kept updating the normalizer.
+    """
+    eval_env = VecNormalize(build_vec_env(env_id, 1), norm_obs=True, norm_reward=False,
+                            clip_obs=train_env.clip_obs, training=False)
+    eval_env.obs_rms = copy.deepcopy(train_env.obs_rms)
+    return eval_env
 
 
 def train(args):
@@ -108,7 +161,8 @@ def train(args):
         print(f"[train] Loading experience from: {args.from_experience}")
 
     # Create vectorized environment with normalization
-    env = DummyVecEnv([make_env(env_id)])
+    print(f"[train] Parallel envs: {args.n_envs}")
+    env = build_vec_env(env_id, args.n_envs)
     env = VecNormalize(env, norm_obs=True, norm_reward=True, clip_obs=10.0)
 
     # Initialize model: from base or from scratch
@@ -159,7 +213,10 @@ def train(args):
         print(f"[train] ONNX export skipped: {e}")
 
     # Evaluate final policy
-    mean_reward, std_reward = evaluate_policy(model, env, n_eval_episodes=20)
+    eval_env = make_eval_env(env_id, env)
+    mean_reward, std_reward = evaluate_policy(model, eval_env, n_eval_episodes=FINAL_EVAL_EPISODES)
+    eval_env.close()
+    env.close()  # stop worker processes
 
     # Write final results
     results = {
@@ -387,6 +444,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--s3-secret-key", default=os.getenv("S3_SECRET_KEY", "fleetos123"))
     parser.add_argument("--callback-url", default=os.getenv("TRAINING_CALLBACK_URL", ""))
     # Tunable PPO hyperparameters (defaults are the previously hard-coded values)
+    parser.add_argument("--n-envs", type=int, default=1,
+                        help="parallel environments (worker processes); rollout = n_steps x n_envs")
     parser.add_argument("--learning-rate", type=float, default=3e-4)
     parser.add_argument("--n-steps", type=int, default=2048)
     parser.add_argument("--batch-size", type=int, default=64)
