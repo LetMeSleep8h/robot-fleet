@@ -161,7 +161,7 @@ Simulator (50 Hz) → gRPC Telemetry (+ training context) → Ingestion → Kafk
 | PPO (locomotion) — manual / bootstrap | On-policy RL in MuJoCo, MLP [256, 256], lr=3e-4, n_steps=2048, gamma=0.99 | `training/train_locomotion.py` |
 | SAC+HER (reaching) | Off-policy RL with hindsight goal relabeling, sparse reward | `training/train_reach.py` |
 | SAC+HER (grasping) | Goal-conditioned grasp+lift with optional scripted demos | `training/train_grasp.py` |
-| CQL-SAC (offline RL) — **the pipeline's trainer** | Conservative Q-Learning on a pinned snapshot of fleet experience; raw observations (no VecNormalize), no simulator | `training/train_offline.py` |
+| CQL-SAC (offline RL) — **the pipeline's trainer** | Conservative Q-Learning on a pinned snapshot of fleet experience; raw observations (no VecNormalize), each joint's full control range as the action space (fleet actions scaled into SAC's [−1, 1] when loaded), no simulator | `training/train_offline.py` |
 | Behavior Cloning | Supervised pre-training on (obs, action) pairs, SB3-compatible output | `training/train_bc.py` |
 | Autoencoder | Unsupervised 86→32-dim representation learning on observations | `training/train_autoencoder.py` |
 | Normalisation | VecNormalize (obs + reward), clip_obs=10.0 | `train_locomotion.py` |
@@ -216,7 +216,7 @@ Simulator (50 Hz) → gRPC Telemetry (+ training context) → Ingestion → Kafk
 | Evaluation type | Detail | File |
 |-----------------|--------|------|
 | Post-training eval | 20 episodes, mean/std reward | `train_locomotion.py` lines 160–185 |
-| Scenario robustness | 5 presets: standard, low_friction, high_gravity, windy, combined | `platform/training/evaluate_policy.py` |
+| Scenario robustness | 5 presets applied to the test-track physics (`FleetOSHumanoidEnv.set_conditions`): standard, low_friction (sliding friction ×0.5), high_gravity (−11 m/s²), windy (5 N side push on the torso), combined | `platform/training/evaluate_policy.py` |
 | Pass gate | reward ≥ 500 AND steps ≥ 100 per scenario | Same |
 | Canary metrics | Live `success_rate` comparison, 10% degradation → rollback | `platform/internal/service/deployment_service.go` |
 | Per-robot gauges | Prometheus: reward, uptime_pct, fall_count, battery | `platform/internal/middleware/metrics.go` |

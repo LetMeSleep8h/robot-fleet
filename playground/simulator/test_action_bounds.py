@@ -77,3 +77,22 @@ def test_edge_action_is_not_clipped_to_unit_box():
     act = mgr.action("r1", np.zeros(86, dtype=np.float32))
 
     assert act is not None and np.allclose(act, -2.5), "edge must pass the policy's action through; physics clips it"
+
+
+def test_cloud_joint_actions_are_not_clipped_to_unit_box():
+    # Joint-dict actions (inference's predicted_actions, command payloads)
+    # keep the policy's joint range; physics clips per actuator.
+    from inference_client import InferenceClient
+    from joint_mapping import FLEET_TO_MUJOCO_ACTUATOR, joint_actions_to_array
+
+    predicted = [{"joint": "right_knee", "torque": -2.5}, {"joint": "unknown", "torque": 9.0}]
+    knee = FLEET_TO_MUJOCO_ACTUATOR["right_knee"]
+
+    base = np.full(NUM_ACTUATORS, 0.3, dtype=np.float32)
+    applied = joint_actions_to_array(predicted, base)
+    assert applied[knee] == -2.5
+    assert np.count_nonzero(applied != 0.3) == 1, "unknown joints are ignored, the rest keep the base"
+    assert base[knee] == 0.3, "the base action is not modified in place"
+
+    parsed = InferenceClient.__new__(InferenceClient)._parse_predicted_actions(predicted)
+    assert parsed[knee] == -2.5

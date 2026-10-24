@@ -667,7 +667,7 @@ def mujoco_to_fleet_actions(mujoco_actions: np.ndarray) -> list[dict]:
     """Convert 25-dim MuJoCo actions to the 25-joint fleet schema (one joint per actuator)."""
     fleet_torques = np.zeros(FLEET_ACTION_DIM, dtype=np.float32)
     for mj_idx, fleet_idx in MUJOCO_TO_FLEET.items():
-        fleet_torques[fleet_idx] = np.clip(mujoco_actions[mj_idx], -1.0, 1.0)
+        fleet_torques[fleet_idx] = mujoco_actions[mj_idx]  # joint range; robots clip per actuator
 
     predicted_actions = []
     for j, joint_name in enumerate(HUMANOID_JOINTS):
@@ -844,7 +844,7 @@ def run_inference(observation: list | None, instruction: str, model_id: str, emb
         biased_action = apply_instruction_bias(raw_action, instruction)
         log.info("  [Bias] Stub policy: instruction bias applied")
     else:
-        biased_action = np.clip(raw_action, -1.0, 1.0)
+        biased_action = raw_action  # robots clip each actuator to its ctrlrange, as in training
 
     # Convert to fleet joint schema
     predicted_actions = mujoco_to_fleet_actions(biased_action)

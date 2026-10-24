@@ -88,7 +88,49 @@ def test_offline_spaces_match_the_policy_contract():
     env = to.OfflineSpaces()
     assert env.observation_space.shape == (to.OBS_DIM,)
     assert env.action_space.shape == (to.ACT_DIM,)
-    assert env.action_space.low.min() == -1.0 and env.action_space.high.max() == 1.0
+
+
+def test_offline_action_space_is_each_joints_control_range_like_the_test_track():
+    # Robots and the test track accept each actuator's full ctrlrange (knee to
+    # -2.8 rad); a [-1, 1] policy could never command those joint targets.
+    from fleetos_env import FleetOSHumanoidEnv
+    track = FleetOSHumanoidEnv().action_space
+    space = to.OfflineSpaces().action_space
+    np.testing.assert_array_equal(space.low, track.low)
+    np.testing.assert_array_equal(space.high, track.high)
+    assert space.low.min() < -1.0
+
+
+def _model(tmp_path, buffer_size=8):
+    args = to.build_parser().parse_args(["--job-id", "j", "--dataset-manifest", "m", "--batch-size", "4"])
+    return to.make_model(args, buffer_size=buffer_size)
+
+
+def test_replay_buffer_holds_fleet_actions_in_sacs_scaled_space(tmp_path):
+    model = _model(tmp_path)
+    low, high = to.OfflineSpaces().action_space.low, to.OfflineSpaces().action_space.high
+    actions = np.stack([low, high, (low + high) / 2, high + 5.0])  # last: out of range
+    data = {
+        "observations": np.zeros((4, to.OBS_DIM), dtype=np.float32),
+        "next_observations": np.zeros((4, to.OBS_DIM), dtype=np.float32),
+        "actions": actions.astype(np.float32),
+        "rewards": np.zeros(4, dtype=np.float32),
+        "dones": np.zeros(4, dtype=np.float32),
+    }
+    to.fill_replay_buffer(model, data)
+    stored = model.replay_buffer.actions[:4, 0]
+    np.testing.assert_allclose(stored[0], -1.0, atol=1e-5)
+    np.testing.assert_allclose(stored[1], 1.0, atol=1e-5)
+    np.testing.assert_allclose(stored[2], 0.0, atol=1e-5)
+    np.testing.assert_allclose(stored[3], 1.0, atol=1e-5)  # clipped to the joint's range
+
+
+def test_trained_policy_acts_in_joint_units(tmp_path):
+    model = _model(tmp_path)
+    action, _ = model.predict(np.zeros(to.OBS_DIM, dtype=np.float32), deterministic=True)
+    space = to.OfflineSpaces().action_space
+    assert np.all(action >= space.low - 1e-5) and np.all(action <= space.high + 1e-5)
+    np.testing.assert_allclose(model.policy.unscale_action(np.ones(to.ACT_DIM)), space.high, rtol=1e-6)
 
 
 # --- dataset loading -------------------------------------------------------------

@@ -328,6 +328,15 @@ def test_learned_policy_actions_are_not_biased(active_model):
     assert result["action"] == pytest.approx([0.0] * server.MUJOCO_ACTION_DIM)
 
 
+def test_learned_policy_actions_keep_their_joint_range(active_model, monkeypatch):
+    # Policies act in each actuator's ctrlrange (knee to -2.8 rad); robots clip
+    # to that range in physics, so serving must not cut targets to [-1, 1].
+    monkeypatch.setattr(server, "_policy", FakePolicy(-2.5))
+    result = server.run_inference(None, "walk", "", "humanoid-v4")
+    assert result["action"] == pytest.approx([-2.5] * server.MUJOCO_ACTION_DIM)
+    assert {a["torque"] for a in result["predicted_actions"]} == {-2.5}
+
+
 def test_stub_policy_actions_are_biased(active_model, monkeypatch):
     monkeypatch.setattr(server, "_policy", server._StubPolicy())
     result = server.run_inference(None, "wave hello", "", "humanoid-v4")

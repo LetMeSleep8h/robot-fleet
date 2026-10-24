@@ -11,6 +11,9 @@ MuJoCo humanoid has 25 actuated joints:
 Our fleet schema has 25 joints — one per actuator (abdomen_x maps to torso_roll).
 """
 
+import numpy as np
+
+
 # MuJoCo actuator index -> our joint name
 # Actuator order matches env.action_space (25 dims)
 MUJOCO_ACTUATOR_TO_FLEET = {
@@ -74,6 +77,18 @@ FLEET_JOINT_NAMES = [
 
 # No unmapped joints — all fleet joints now have MuJoCo actuators
 UNMAPPED_JOINTS: set[str] = set()
+
+
+def joint_actions_to_array(entries, base):
+    """Apply fleet joint-dict actions ({"joint", "torque" | "position"}) onto a
+    copy of a 25-dim actuator action. Values keep the policy's joint range;
+    the physics step clips each actuator to its ctrlrange."""
+    action = np.array(base, dtype=np.float32, copy=True)
+    for entry in entries:
+        idx = FLEET_TO_MUJOCO_ACTUATOR.get(entry.get("joint", ""))
+        if idx is not None:
+            action[idx] = entry.get("torque", entry.get("position", 0.0))
+    return action
 
 
 def extract_joint_states(qpos, qvel, actuator_force):
