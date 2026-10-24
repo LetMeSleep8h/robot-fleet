@@ -18,7 +18,6 @@ import numpy as np
 
 DEFAULT_FRACTION = 0.2
 DEFAULT_STD = 0.1
-ACTION_LOW, ACTION_HIGH = -1.0, 1.0
 _HASH_BUCKETS = 1000
 
 
@@ -43,11 +42,19 @@ class Explorer:
             std=float(os.environ.get("EXPLORATION_STD", DEFAULT_STD)),
         )
 
-    def apply(self, robot_id: str, action: np.ndarray, refresh: bool) -> tuple[np.ndarray, bool]:
-        """Return (applied action, explored). refresh=True draws new noise."""
+    def apply(self, robot_id: str, action: np.ndarray, refresh: bool,
+              bounds: tuple[np.ndarray, np.ndarray] | None = None) -> tuple[np.ndarray, bool]:
+        """Return (applied action, explored). refresh=True draws new noise.
+
+        bounds: the robot's per-actuator (low, high) control range; noisy
+        actions are clipped to it (the range the policy was trained in).
+        """
         if self.std <= 0 or not is_exploration_robot(robot_id, self.fraction):
             return action, False
         if refresh or robot_id not in self._noise:
             self._noise[robot_id] = self._rng.normal(0.0, self.std, size=action.shape).astype(np.float32)
-        noisy = np.clip(action + self._noise[robot_id], ACTION_LOW, ACTION_HIGH).astype(np.float32)
+        noisy = action + self._noise[robot_id]
+        if bounds is not None:
+            noisy = np.clip(noisy, bounds[0], bounds[1])
+        noisy = noisy.astype(np.float32)
         return noisy, True

@@ -301,6 +301,13 @@ class LabSimulation:
         """Current simulation time in seconds."""
         return self.data.time
 
+    def action_bounds(self, robot_id: str) -> tuple[np.ndarray, np.ndarray]:
+        """Per-actuator (low, high) control range for a robot, from the scene."""
+        robot = self._find_robot(robot_id)
+        start = robot["actuator_start"]
+        ranges = self.model.actuator_ctrlrange[start:start + NUM_ACTUATORS]
+        return ranges[:, 0], ranges[:, 1]
+
     def step(self, actions: dict[str, np.ndarray], task_commands: dict[str, str] | None = None,
              n_substeps: int = 7):
         """Advance physics by n_substeps to match real-time at 50 Hz control rate.
@@ -313,13 +320,14 @@ class LabSimulation:
         if task_commands is None:
             task_commands = {}
 
-        # Apply actions to actuators (held constant across sub-steps)
+        # Apply actions to actuators (held constant across sub-steps), clipped
+        # to each actuator's control range exactly like the training env.
         for robot in self.robots:
             rid = robot["id"]
             if rid in actions:
-                action = np.clip(actions[rid], -1.0, 1.0)
+                low, high = self.action_bounds(rid)
                 start = robot["actuator_start"]
-                self.data.ctrl[start:start + NUM_ACTUATORS] = action
+                self.data.ctrl[start:start + NUM_ACTUATORS] = np.clip(actions[rid], low, high)
 
         for _ in range(n_substeps):
             mujoco.mj_step(self.model, self.data)

@@ -198,7 +198,8 @@ def main():
 
                 # Exploration noise (held per transition) for exploration
                 # robots. The applied action is what gets recorded.
-                applied, explored = explorer.apply(rid, policy_action, refresh=record_tick)
+                applied, explored = explorer.apply(rid, policy_action, refresh=record_tick,
+                                                   bounds=sim.action_bounds(rid))
                 actions[rid] = applied
                 task_commands[rid] = task.current_task
 

@@ -218,14 +218,16 @@ def test_parse_tasks():
     assert ep.parse_tasks(" walk, move ,") == frozenset({"walk", "move"})
 
 
-def test_actions_are_clipped_to_actuator_range():
+def test_actions_pass_through_for_physics_to_clip():
+    # Policies act in each joint's control range (beyond [-1, 1] for knees and
+    # hips); the simulator's physics step applies the actuator limits.
     platform = FakePlatform()
     platform.responses["r1"] = policy_body("r1", "training/a/policy.zip")
     m = ep.EdgePolicyManager(api_url="http://api", api_key="k", http_get=platform,
                              fetch_and_load=lambda url: FakePolicy(3.0))
     m.register_robot("r1")
     m.refresh_once()
-    assert m.action("r1", np.zeros(ep.OBS_DIM)) == pytest.approx(np.full(ep.ACTION_DIM, 1.0))
+    assert m.action("r1", np.zeros(ep.OBS_DIM)) == pytest.approx(np.full(ep.ACTION_DIM, 3.0))
 
 
 def test_load_policy_file_real_ppo_with_vecnormalize(tmp_path):

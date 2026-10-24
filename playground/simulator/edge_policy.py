@@ -199,7 +199,9 @@ class EdgePolicyManager:
         policy, policy_lock = entry
         with policy_lock:  # SB3 predict() isn't safe to call concurrently
             act, _ = policy.predict(np.asarray(obs, dtype=np.float32), deterministic=True)
-        return np.clip(np.asarray(act, dtype=np.float32), -1.0, 1.0)
+        # No [-1, 1] clip: actions span each joint's control range (e.g. knee to
+        # -2.8 rad); the physics step clips to the actuator limits like training.
+        return np.asarray(act, dtype=np.float32)
 
     def refresh_once(self) -> None:
         with self._lock:
