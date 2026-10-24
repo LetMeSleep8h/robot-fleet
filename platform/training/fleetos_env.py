@@ -17,7 +17,7 @@ from gymnasium import spaces
 from gymnasium.envs.registration import register
 
 from observation import build_observation_from_mujoco, OBS_DIM, NUM_ACTUATORS
-from locomotion_reward import control_cost, has_fallen, locomotion_reward
+from locomotion_reward import MAX_EPISODE_STEPS, control_cost, has_fallen, locomotion_reward
 
 ASSETS_DIR = Path(__file__).parent / "assets"
 LAB_XML = ASSETS_DIR / "lab_room.xml"
@@ -30,7 +30,7 @@ class FleetOSHumanoidEnv(gym.Env):
 
     metadata = {"render_modes": ["rgb_array"], "render_fps": 50}
 
-    def __init__(self, render_mode=None, max_episode_steps=1000):
+    def __init__(self, render_mode=None, max_episode_steps=MAX_EPISODE_STEPS):
         super().__init__()
 
         if not LAB_XML.exists():
@@ -139,5 +139,5 @@ def register_fleetos_env():
     register(
         id="FleetOS-Humanoid-v2",
         entry_point="fleetos_env:FleetOSHumanoidEnv",
-        max_episode_steps=1000,
+        max_episode_steps=MAX_EPISODE_STEPS,
     )

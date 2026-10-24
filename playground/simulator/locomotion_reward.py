@@ -12,6 +12,7 @@ FALL_Z = 0.3            # torso height below which the robot has fallen (episode
 FALL_PENALTY = -10.0
 ALIVE_BONUS = 1.0
 CTRL_COST_WEIGHT = 0.1
+MAX_EPISODE_STEPS = 1000  # control ticks before an episode is truncated (not a fall)
 
 
 def has_fallen(height: float) -> bool:

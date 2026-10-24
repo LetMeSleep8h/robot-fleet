@@ -13,7 +13,7 @@ from pathlib import Path
 import mujoco
 import numpy as np
 
-from locomotion_reward import FALL_PENALTY, control_cost, has_fallen, locomotion_reward
+from locomotion_reward import FALL_PENALTY, MAX_EPISODE_STEPS, control_cost, has_fallen, locomotion_reward
 
 from joint_mapping import extract_joint_states, extract_root_pose, MUJOCO_QPOS_OFFSET
 
@@ -30,6 +30,7 @@ JOINT_QPOS_SIZE = 25
 JOINT_QVEL_SIZE = 25
 BODY_QPOS_SIZE = ROOT_QPOS_SIZE + JOINT_QPOS_SIZE  # 32
 BODY_QVEL_SIZE = ROOT_QVEL_SIZE + JOINT_QVEL_SIZE   # 31
+RESET_WALL_MARGIN = 1.0  # m: a robot ending closer than this to a wall respawns
 
 
 
@@ -47,6 +48,9 @@ class LabSimulation:
         """Load or reload the MuJoCo model from an XML string."""
         self.model = mujoco.MjModel.from_xml_string(xml_string)
         self.data = mujoco.MjData(self.model)
+        # Robots that end beyond this |x|, |y| respawn (the walls sit at the floor's edge).
+        floor_half_size = self.model.geom_size[self.model.geom("floor").id][0]
+        self._reset_limit = float(floor_half_size) - RESET_WALL_MARGIN
 
         # Rebuild robot tracking using mj_name2id for correct offsets.
         # Dynamic objects (red_box, blue_cylinder) have freejoints that
@@ -81,6 +85,7 @@ class LabSimulation:
                 "reward_accum": 0.0,
                 "episode_steps": 0,
                 "fall_count": 0,
+                "truncation_count": 0,
                 "episode_count": 0,
                 "total_reward": 0.0,
                 "total_steps": 0,
@@ -355,9 +360,14 @@ class LabSimulation:
             robot["episode_steps"] += 1
             robot["total_steps"] += 1
 
-            # Fall detection and reset (same rule as the training env)
-            if has_fallen(height):
-                robot["fall_count"] += 1
+            # Episode end and reset: a fall, or the test track's time limit
+            # (truncation, so a robot can't idle or lean somewhere forever).
+            fell = has_fallen(height)
+            if fell or robot["episode_steps"] >= MAX_EPISODE_STEPS:
+                if fell:
+                    robot["fall_count"] += 1
+                else:
+                    robot["truncation_count"] += 1
                 robot["episode_count"] += 1
                 robot["total_reward"] += robot["reward_accum"]
                 robot["reward_accum"] = 0.0
@@ -433,15 +443,19 @@ class LabSimulation:
         qpos_start = robot["qpos_start"]
         qvel_start = robot["qvel_start"]
 
-        # Standing pose: position at (x, y, 1.4), upright quaternion
-        current_x = self.data.qpos[qpos_start]
-        current_y = self.data.qpos[qpos_start + 1]
+        # Stand up where the robot fell; near a wall, go back to its spawn point
+        # instead (stood up at a wall, it leans on it above the fall height).
+        current_x, current_y = self.data.qpos[qpos_start:qpos_start + 2]
+        limit = self._reset_limit
+        if abs(current_x) > limit or abs(current_y) > limit:
+            current_x, current_y = self.model.qpos0[qpos_start:qpos_start + 2]
         self.data.qpos[qpos_start:qpos_start + BODY_QPOS_SIZE] = 0.0
         self.data.qpos[qpos_start + 0] = current_x  # keep x
         self.data.qpos[qpos_start + 1] = current_y  # keep y
         self.data.qpos[qpos_start + 2] = 1.22        # standing height (feet at floor)
         self.data.qpos[qpos_start + 3] = 1.0         # quaternion w
         self.data.qvel[qvel_start:qvel_start + BODY_QVEL_SIZE] = 0.0
+        robot["prev_x"] = float(current_x)  # a respawn is not forward progress
 
         if self.steps % 500 == 0:
             log.info("Reset %s at step %d", robot["id"], self.steps)

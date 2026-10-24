@@ -73,3 +73,12 @@ def test_inference_builds_the_same_observation_version():
     server = REPO / "platform" / "inference" / "server.py"
     assert _module_constant(server, "OBS_VERSION") == observation.OBS_VERSION, \
         "inference serves a different observation version than training produces"
+
+
+def test_robots_and_test_track_share_the_episode_cap():
+    from fleetos_env import FleetOSHumanoidEnv
+    from locomotion_reward import MAX_EPISODE_STEPS
+
+    assert FleetOSHumanoidEnv()._max_episode_steps == MAX_EPISODE_STEPS
+    sim_src = (REPO / "playground" / "simulator" / "mujoco_env.py").read_text()
+    assert "MAX_EPISODE_STEPS" in sim_src, "robots must truncate episodes like the test track"
