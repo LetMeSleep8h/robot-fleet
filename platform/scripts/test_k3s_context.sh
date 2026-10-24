@@ -27,10 +27,22 @@ cat >"$WORK/bin/colima" <<EOF
 echo "colima \$*" >>"$CALLS"
 if [ "\${1:-}" = list ]; then echo '{"status":"Running","address":"192.0.2.1"}'; fi
 EOF
+# df: the script's disk check uses macOS's `df -g`; CI runs on Linux.
+cat >"$WORK/bin/df" <<'EOF'
+#!/usr/bin/env bash
+printf 'Filesystem 1G-blocks Used Available\n/dev/disk1 500 100 400\n'
+EOF
 chmod +x "$WORK/bin/"*
 export PATH="$WORK/bin:$PATH"
 
 failures=0
+# Run a command; on failure show its output (the checks below need it to finish).
+run() {
+    if ! "$@" >"$WORK/out.log" 2>&1; then
+        echo "FAIL running: $*"; sed 's/^/    /' "$WORK/out.log"
+        exit 1
+    fi
+}
 check() {
     local label="$1" expected="$2"
     local bad
@@ -51,18 +63,18 @@ check() {
 }
 
 : >"$CALLS"
-"$SCRIPT_DIR/k3s-setup.sh" >/dev/null 2>&1
+run "$SCRIPT_DIR/k3s-setup.sh"
 check "k3s-setup.sh" "--context colima\|--kube-context colima"
 
-"$SCRIPT_DIR/k3s-setup.sh" --images >/dev/null 2>&1
+run "$SCRIPT_DIR/k3s-setup.sh" --images
 check "k3s-setup.sh --images" "--context colima"
 
-make -s -C "$PLATFORM_DIR" k3s-train TASK=locomotion TIMESTEPS=10 >/dev/null
+run make -s -C "$PLATFORM_DIR" k3s-train TASK=locomotion TIMESTEPS=10
 check "make k3s-train" "--context colima"
 
 for target in k8s-train k8s-sync k8s-status "k8s-logs SVC=api" "k8s-reload SVC=api"; do
     # shellcheck disable=SC2086  # target may carry a variable assignment
-    make -s -C "$PLATFORM_DIR" $target TASK=locomotion >/dev/null 2>&1
+    run make -s -C "$PLATFORM_DIR" $target TASK=locomotion
     check "make $target" "--context kind-fleetos"
 done
 
