@@ -56,3 +56,50 @@ def test_refuses_policies_without_matching_obs_version(tmp_path):
         ep.check_compatible(str(model))
     pm.write_policy_meta(tmp_path)
     ep.check_compatible(str(model))  # compatible: no exception
+
+
+# issue #13: which gate failed, and the episode-length gate has its own reason.
+
+class _FakeEnv:
+    """Records steps and yields a scripted reward, then ends the episode."""
+
+    def __init__(self, reward, steps):
+        self.reward = reward
+        self.steps = steps
+        self._n = 0
+
+    def env_method(self, *a, **k):
+        pass
+
+    def reset(self):
+        return None
+
+    def step(self, action):
+        self._n += 1
+        return None, [self.reward], self._n >= self.steps, {}
+
+
+def _run(monkeypatch, reward, steps):
+    env = _FakeEnv(reward, steps)
+    model = type("M", (), {"predict": staticmethod(lambda obs, deterministic=True: (None, None))})
+    result = ep.run_scenario(model, env, "s1", "preset", {})
+    return result
+
+
+def test_low_reward_failure_names_the_reward_gate(monkeypatch):
+    result = _run(monkeypatch, reward=1.0, steps=400)
+    assert not result["passed"]
+    assert "reward" in result["failure_reason"]
+    assert "500" in result["failure_reason"]
+
+
+def test_short_high_reward_failure_names_the_length_gate(monkeypatch):
+    result = _run(monkeypatch, reward=600.0, steps=50)
+    assert not result["passed"]
+    assert "steps" in result["failure_reason"]
+    assert "reward" not in result["failure_reason"]
+
+
+def test_passing_scenario_has_no_reason(monkeypatch):
+    result = _run(monkeypatch, reward=600.0, steps=120)
+    assert result["passed"] and result["failure_reason"] == ""

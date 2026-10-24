@@ -18,6 +18,13 @@ from pathlib import Path
 import gymnasium as gym
 import numpy as np
 from policy_meta import META_FILENAME, incompatibility, read_policy_meta
+from locomotion_reward import MAX_EPISODE_STEPS
+
+# A scenario passes when it earns at least MIN_REWARD_THRESHOLD reward and ran
+# at least MIN_STEPS control ticks — an episode that ends fast on a fall scores
+# high but learned nothing, so length is a separate gate with its own reason.
+MIN_REWARD_THRESHOLD = 500.0
+MIN_STEPS = 100
 from stable_baselines3 import PPO, SAC
 from stable_baselines3.common.vec_env import DummyVecEnv, VecNormalize
 
@@ -185,25 +192,26 @@ def run_scenario(model, env, scenario_id: str, preset_name: str, config: dict) -
     done = False
     violations = []
 
-    # Minimum reward threshold for "passing"
-    min_reward_threshold = 500.0
-    max_steps = 1000
-
-    while not done and steps < max_steps:
+    while not done and steps < MAX_EPISODE_STEPS:
         action, _ = model.predict(obs, deterministic=True)
         obs, reward, done, info = env.step(action)
         total_reward += float(reward[0])
         steps += 1
 
-    passed = total_reward >= min_reward_threshold and steps >= 100
+    if total_reward < MIN_REWARD_THRESHOLD:
+        reason = f"reward {total_reward:.0f} < {MIN_REWARD_THRESHOLD:.0f}"
+    elif steps < MIN_STEPS:
+        reason = f"episode ended after {steps} steps < {MIN_STEPS}"
+    else:
+        reason = ""
 
     return {
         "scenario_id": scenario_id,
         "preset": preset_name,
-        "passed": passed,
+        "passed": not reason,
         "reward": round(total_reward, 2),
         "episode_length": steps,
-        "failure_reason": "" if passed else f"reward {total_reward:.0f} < {min_reward_threshold}",
+        "failure_reason": reason,
         "config": config,
     }
 
