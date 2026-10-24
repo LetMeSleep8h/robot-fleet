@@ -111,12 +111,5 @@ class InferenceClient:
 
     def _parse_predicted_actions(self, predicted_actions: list) -> np.ndarray:
         """Parse the legacy predicted_actions format (list of joint dicts)."""
-        from joint_mapping import FLEET_TO_MUJOCO_ACTUATOR
-        action = np.zeros(NUM_ACTUATORS, dtype=np.float32)
-        for entry in predicted_actions:
-            joint_name = entry.get("joint", "")
-            torque = entry.get("torque", entry.get("position", 0.0))
-            if joint_name in FLEET_TO_MUJOCO_ACTUATOR:
-                idx = FLEET_TO_MUJOCO_ACTUATOR[joint_name]
-                action[idx] = np.clip(torque, -1.0, 1.0)
-        return action
+        from joint_mapping import joint_actions_to_array
+        return joint_actions_to_array(predicted_actions, np.zeros(NUM_ACTUATORS, dtype=np.float32))

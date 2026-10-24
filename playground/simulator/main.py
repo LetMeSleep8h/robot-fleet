@@ -1,12 +1,15 @@
 """
 MuJoCo lab room robot simulator for FleetOS.
 
-All robot actions come from the inference server — no hardcoded gaits.
-The simulator is a pure physics engine + telemetry sender.
+No hardcoded gaits: actions come from trained policies. For locomotion tasks a
+robot runs its platform-assigned policy locally every control tick (edge
+execution, see edge_policy.py); other tasks use the cloud inference service.
+The platform decides which model each robot runs.
 
 Architecture:
   TaskState  — receives gRPC commands, tracks what robot should do
-  InferenceClient — async HTTP client, gets actions from trained policies
+  EdgePolicyManager — runs each robot's assigned policy locally (locomotion)
+  InferenceClient — async HTTP client to cloud inference (everything else)
   LabSimulation — MuJoCo physics engine
   TelemetryClient — streams state to platform
 
@@ -17,6 +20,7 @@ Environment variables:
     SIM_STEP_HZ     Physics step rate (default: 50)
     TELEMETRY_HZ    Telemetry send rate (default: 10)
     CONTROL_PORT    HTTP control server port (default: 8085)
+    EDGE_POLICY, EDGE_POLICY_TASKS, PLATFORM_API_URL, ... — see edge_policy.py
 """
 
 import logging
@@ -55,8 +59,17 @@ def main():
     from frame_server import start_server, set_spawn_callback, set_list_robots_callback
     from exploration import Explorer
     from transitions import TransitionRecorder
+    from edge_policy import EdgePolicyManager, DEFAULT_TASKS, choose_action_source, parse_tasks
 
     sim = LabSimulation()
+    edge_enabled = os.environ.get("EDGE_POLICY", "true").lower() == "true"
+    edge_tasks = parse_tasks(os.environ.get("EDGE_POLICY_TASKS", DEFAULT_TASKS))
+    edge = EdgePolicyManager.from_env() if edge_enabled else None
+    if edge:
+        edge.register_robot(robot_id)
+        edge.start()
+    log.info("Edge policy execution: %s (tasks=%s)", edge_enabled, sorted(edge_tasks))
+    action_source: dict[str, str] = {}
     explorer = Explorer.from_env()
     recorders: dict[str, TransitionRecorder] = {}
     log.info("Exploration: fraction=%.2f std=%.2f", explorer.fraction, explorer.std)
@@ -136,6 +149,8 @@ def main():
                 if new_rid and new_rid not in tasks:
                     tasks[new_rid] = _make_task(new_rid)
                     infer[new_rid] = _make_inference(new_rid)
+                if new_rid and edge:
+                    edge.register_robot(new_rid)
 
             # Build observations, request inference, get actions
             robot_ids = sim.get_all_robot_ids()
@@ -151,6 +166,8 @@ def main():
                 if rid not in tasks:
                     tasks[rid] = _make_task(rid)
                     infer[rid] = _make_inference(rid)
+                    if edge:
+                        edge.register_robot(rid)
 
                 task = tasks[rid]
                 robot = sim._find_robot(rid)
@@ -164,23 +181,30 @@ def main():
                     task_command=task.current_task,
                 )
 
-                # Request inference (non-blocking, ~10 Hz)
-                infer[rid].request_action(
-                    obs.tolist(),
-                    task.current_task,
-                    goal=task.current_goal,
-                )
+                # Locomotion: the robot's assigned policy runs locally on this
+                # tick's observation (as in training/evaluation). Otherwise:
+                # cloud inference (async, ~10 Hz, latest result held).
+                current = task.current_task
+                edge_action = edge.action(rid, obs) if edge and current in edge_tasks else None
+                source = choose_action_source(current, edge_enabled, edge_action, edge_tasks)
+                if action_source.get(rid) != source:
+                    log.info("robot %s action source: %s (task=%s)", rid, source, current)
+                    action_source[rid] = source
+                if source == "edge":
+                    policy_action = edge_action
+                else:
+                    infer[rid].request_action(obs.tolist(), current, goal=task.current_goal)
+                    policy_action = infer[rid].get_cached_action()
 
-                # Cached policy action (latest inference result), plus held
-                # exploration noise for exploration robots. The applied action
-                # is what gets recorded.
-                applied, explored = explorer.apply(
-                    rid, infer[rid].get_cached_action(), refresh=record_tick)
+                # Exploration noise (held per transition) for exploration
+                # robots. The applied action is what gets recorded.
+                applied, explored = explorer.apply(rid, policy_action, refresh=record_tick,
+                                                   bounds=sim.action_bounds(rid))
                 actions[rid] = applied
                 task_commands[rid] = task.current_task
 
                 rec = recorders.setdefault(rid, TransitionRecorder(rid))
-                episodes_before[rid] = robot["episode_count"]
+                episodes_before[rid] = (robot["fall_count"], robot["truncation_count"])
                 records[rid] = rec.before_step(
                     obs, applied, explored, robot["cum_reward"], record=record_tick)
 
@@ -193,8 +217,10 @@ def main():
                 robot = sim._find_robot(rid)
                 if not robot or rid not in recorders:
                     continue
-                fell = robot["episode_count"] != episodes_before.get(rid, robot["episode_count"])
-                terminal = recorders[rid].after_step(robot["cum_reward"], fell=fell)
+                falls, truncations = episodes_before.get(rid, (robot["fall_count"], robot["truncation_count"]))
+                terminal = recorders[rid].after_step(robot["cum_reward"],
+                                                     fell=robot["fall_count"] != falls,
+                                                     truncated=robot["truncation_count"] != truncations)
                 # Telemetry goes out on record ticks, and immediately on a fall
                 # so the terminal transition is not lost.
                 if not (record_tick or terminal):
@@ -239,6 +265,8 @@ def main():
         log.info("Interrupted")
     finally:
         log.info("Cleaning up after %d steps", step)
+        if edge:
+            edge.stop()
         sim.close()
         for t in tasks.values():
             t.close()

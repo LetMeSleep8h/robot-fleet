@@ -94,7 +94,7 @@ func TestBuildTransition_LegacyContextWithoutObservation(t *testing.T) {
 func TestObjectKey(t *testing.T) {
 	ts := time.Date(2026, 10, 18, 7, 0, 0, 5, time.UTC)
 	key := ObjectKey("robot-0001", ts)
-	if key != "training_data/v2/2026/10/18/07/robot-0001/transitions_1792306800000000005.ndjson" {
+	if key != "training_data/v3/2026/10/18/07/robot-0001/transitions_1792306800000000005.ndjson" {
 		t.Errorf("key = %q", key)
 	}
 	if !strings.HasPrefix(key, Prefix) {
@@ -103,10 +103,14 @@ func TestObjectKey(t *testing.T) {
 }
 
 func TestPrefixIsVersionedAwayFromLegacyRecords(t *testing.T) {
-	// Pre-v2 records (no observation) live directly under training_data/YYYY/...;
-	// snapshots must never pick them up.
-	legacy := "training_data/2026/10/18/07/robot-0001/transitions_1.ndjson"
-	if strings.HasPrefix(legacy, Prefix) {
-		t.Errorf("legacy key %q must not match Prefix %q", legacy, Prefix)
+	// Older records never match: pre-v2 (no observation, directly under
+	// training_data/YYYY/...) and v2 (world-frame observation).
+	for _, legacy := range []string{
+		"training_data/2026/10/18/07/robot-0001/transitions_1.ndjson",
+		"training_data/v2/2026/10/18/07/robot-0001/transitions_1.ndjson",
+	} {
+		if strings.HasPrefix(legacy, Prefix) {
+			t.Errorf("legacy key %q must not match Prefix %q", legacy, Prefix)
+		}
 	}
 }

@@ -49,7 +49,7 @@ func UsageMetering(cache store.CacheStore) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			tenantID := auth.GetTenantID(r.Context())
-			if tenantID != "" {
+			if tenantID != "" && !IsControlPlane(r) {
 				cache.IncrementUsageCounter(r.Context(), tenantID, "api_calls")
 				TenantAPIUsage.WithLabelValues(tenantID).Inc()
 			}
@@ -64,7 +64,7 @@ func QuotaEnforcement(cache store.CacheStore, tierResolver func(string) string) 
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			tenantID := auth.GetTenantID(r.Context())
-			if tenantID == "" {
+			if tenantID == "" || IsControlPlane(r) {
 				next.ServeHTTP(w, r)
 				return
 			}

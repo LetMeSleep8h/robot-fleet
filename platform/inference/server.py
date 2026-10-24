@@ -94,6 +94,10 @@ S3_MODEL_PREFIX = os.environ.get("S3_MODEL_PREFIX", "models/humanoid-v4-ppo")
 
 # Unified observation dimension (from observation.py)
 OBS_DIM = 86
+# Observation layout version this service builds observations for. Must match
+# platform/training/observation.py OBS_VERSION (checked by test_parity.py).
+OBS_VERSION = 3
+META_FILENAME = "policy_meta.json"
 # Also accept legacy 376-dim for backward compatibility
 LEGACY_OBS_DIM = 376
 
@@ -412,6 +416,24 @@ def _download_model_from_s3(artifact_url: str = "", zip_path: str | None = None)
         Path(zip_path).parent.mkdir(parents=True, exist_ok=True)
         client.fget_object(S3_BUCKET, s3_key, zip_path)
         log.info("[Model] Downloaded from s3://%s/%s", S3_BUCKET, s3_key)
+        # Normalization stats are optional (offline models have none).
+        norm_local = normalizer_path(zip_path)
+        if os.path.exists(norm_local):
+            os.remove(norm_local)  # never pair a new policy with stale stats
+        try:
+            client.fget_object(S3_BUCKET, normalizer_key(s3_key), norm_local)
+            log.info("[Model] Downloaded normalization stats %s", normalizer_key(s3_key))
+        except Exception as norm_err:
+            log.info("[Model] No normalization stats for %s (%s) — serving raw observations",
+                     s3_key, norm_err)
+        # Compatibility metadata: missing/stale means the policy is refused.
+        meta_local = str(Path(zip_path).parent / META_FILENAME)
+        if os.path.exists(meta_local):
+            os.remove(meta_local)
+        try:
+            client.fget_object(S3_BUCKET, str(Path(s3_key).parent / META_FILENAME), meta_local)
+        except Exception as meta_err:
+            log.warning("[Model] No %s for %s (%s)", META_FILENAME, s3_key, meta_err)
         return True
     except ImportError:
         log.warning("[Model] minio package not installed — cannot download from S3")
@@ -419,6 +441,57 @@ def _download_model_from_s3(artifact_url: str = "", zip_path: str | None = None)
     except Exception as e:
         log.warning("[Model] Could not download model from S3: %s", e)
         return False
+
+
+# ─── Observation normalization ──────────────────────────────────
+# PPO policies are trained behind VecNormalize; serving must feed them
+# observations scaled exactly as in training. The stats ship next to the
+# policy as vec_normalize.pkl (offline CQL models have none: raw obs).
+
+NORMALIZER_FILE = "vec_normalize.pkl"
+
+
+def normalize_obs(obs, mean, var, clip_obs: float, epsilon: float) -> np.ndarray:
+    """VecNormalize's observation transform: clip((obs - mean) / sqrt(var + eps))."""
+    out = (np.asarray(obs, dtype=np.float64) - mean) / np.sqrt(var + epsilon)
+    return np.clip(out, -clip_obs, clip_obs).astype(np.float32)
+
+
+def normalizer_path(policy_path: str) -> str:
+    """Local vec_normalize.pkl that belongs to a policy file (same directory)."""
+    return str(Path(policy_path).parent / NORMALIZER_FILE)
+
+
+def normalizer_key(artifact_url: str) -> str:
+    """S3 key of the vec_normalize.pkl uploaded alongside an artifact."""
+    key = _parse_s3_key(artifact_url)
+    return str(Path(key).parent / NORMALIZER_FILE)
+
+
+def load_obs_normalizer(path: str):
+    """Return obs -> normalized obs from a saved VecNormalize, or None if absent."""
+    if not os.path.exists(path):
+        return None
+    import pickle
+    with open(path, "rb") as f:
+        vec = pickle.load(f)  # trusted: written by our own training jobs
+    mean, var = np.asarray(vec.obs_rms.mean), np.asarray(vec.obs_rms.var)
+    clip_obs, epsilon = float(vec.clip_obs), float(vec.epsilon)
+    return lambda obs: normalize_obs(obs, mean, var, clip_obs, epsilon)
+
+
+class NormalizedPolicy:
+    """Wraps a policy so predict() sees training-scaled observations."""
+
+    def __init__(self, policy, normalize):
+        self._policy = policy
+        self._normalize = normalize
+        self.observation_space = getattr(policy, "observation_space", None)
+
+    def predict(self, obs, deterministic=False):
+        if isinstance(obs, dict):  # goal-conditioned policies aren't trained behind VecNormalize
+            return self._policy.predict(obs, deterministic=deterministic)
+        return self._policy.predict(self._normalize(obs), deterministic=deterministic)
 
 
 class _StubPolicy:
@@ -433,12 +506,41 @@ class _StubPolicy:
         return np.zeros(MUJOCO_ACTION_DIM, dtype=np.float32), None
 
 
+class IncompatiblePolicy(RuntimeError):
+    """The policy was trained on a different observation layout; never serve it."""
+
+
+def policy_incompatibility(meta_path: str) -> str | None:
+    """Why the policy whose policy_meta.json is at meta_path can't be served, or None."""
+    if not os.path.exists(meta_path):
+        return (f"no {META_FILENAME}: policy predates observation version {OBS_VERSION} "
+                "(world-frame observations); retrain it")
+    with open(meta_path) as f:
+        version = json.load(f).get("obs_version")
+    if version != OBS_VERSION:
+        return f"policy uses observation version {version}, this build uses {OBS_VERSION}; retrain it"
+    return None
+
+
 def load_policy_file(path: str):
     """Load an SB3 policy saved at `path` (with or without .zip).
 
     Locomotion policies are PPO; reach/grasp policies are SAC (+HER). The zip
-    doesn't say which, so try PPO first and fall back to SAC.
+    doesn't say which, so try PPO first and fall back to SAC. Policies trained
+    on another observation version are refused (IncompatiblePolicy).
     """
+    reason = policy_incompatibility(str(Path(path).parent / META_FILENAME))
+    if reason:
+        raise IncompatiblePolicy(f"{path}: {reason}")
+    model = _load_sb3(path)
+    normalize = load_obs_normalizer(normalizer_path(path))
+    if normalize is not None:
+        log.info("[Model] Applying observation normalization from %s", normalizer_path(path))
+        return NormalizedPolicy(model, normalize)
+    return model
+
+
+def _load_sb3(path: str):
     from stable_baselines3 import PPO, SAC
 
     try:
@@ -521,19 +623,22 @@ def load_model(artifact_url: str = ""):
     """
     zip_path = str(MODEL_PATH) + ".zip"
 
-    # Try local cache first
-    if os.path.exists(zip_path):
-        log.info("[Model] Loading cached model from %s", zip_path)
-        model = load_policy_file(str(MODEL_PATH))
-        log.info("[Model] Model loaded successfully")
-        return model
+    try:
+        # Try local cache first
+        if os.path.exists(zip_path):
+            log.info("[Model] Loading cached model from %s", zip_path)
+            model = load_policy_file(str(MODEL_PATH))
+            log.info("[Model] Model loaded successfully")
+            return model
 
-    # Try downloading from S3
-    if _download_model_from_s3(artifact_url) and os.path.exists(zip_path):
-        log.info("[Model] Loading downloaded model from %s", zip_path)
-        model = load_policy_file(str(MODEL_PATH))
-        log.info("[Model] Model loaded successfully")
-        return model
+        # Try downloading from S3
+        if _download_model_from_s3(artifact_url) and os.path.exists(zip_path):
+            log.info("[Model] Loading downloaded model from %s", zip_path)
+            model = load_policy_file(str(MODEL_PATH))
+            log.info("[Model] Model loaded successfully")
+            return model
+    except IncompatiblePolicy as exc:
+        log.error("[Model] Refusing incompatible policy: %s", exc)
 
     # No model available — use stub that produces zero actions
     log.warning("[Model] No trained model found. Using zero-action stub.")
@@ -562,7 +667,7 @@ def mujoco_to_fleet_actions(mujoco_actions: np.ndarray) -> list[dict]:
     """Convert 25-dim MuJoCo actions to the 25-joint fleet schema (one joint per actuator)."""
     fleet_torques = np.zeros(FLEET_ACTION_DIM, dtype=np.float32)
     for mj_idx, fleet_idx in MUJOCO_TO_FLEET.items():
-        fleet_torques[fleet_idx] = np.clip(mujoco_actions[mj_idx], -1.0, 1.0)
+        fleet_torques[fleet_idx] = mujoco_actions[mj_idx]  # joint range; robots clip per actuator
 
     predicted_actions = []
     for j, joint_name in enumerate(HUMANOID_JOINTS):
@@ -711,9 +816,10 @@ def run_inference(observation: list | None, instruction: str, model_id: str, emb
         obs = get_default_observation()
 
     # Run policy
+    served_policy = policy
     try:
         with policy_lock:
-            raw_action, _states = policy.predict(build_policy_obs(policy, obs, goal), deterministic=False)
+            raw_action, _states = policy.predict(build_policy_obs(policy, obs, goal), deterministic=True)
     except Exception as exc:
         if policy is _policy:
             raise
@@ -723,17 +829,22 @@ def run_inference(observation: list | None, instruction: str, model_id: str, emb
                     model_id, exc)
         model_id, model_version = _active_model.snapshot()
         fallback = True
+        served_policy = _policy
         with _policy_lock:
-            raw_action, _states = _policy.predict(build_policy_obs(_policy, obs, goal), deterministic=False)
+            raw_action, _states = _policy.predict(build_policy_obs(_policy, obs, goal), deterministic=True)
 
     raw_action = np.asarray(raw_action, dtype=np.float32)
     log.info("  [Policy] Raw action (17-dim): mean=%.3f, std=%.3f, range=[%.3f, %.3f]",
              raw_action.mean(), raw_action.std(), raw_action.min(), raw_action.max())
 
-    # Apply instruction bias
-    biased_action = apply_instruction_bias(raw_action, instruction)
-    log.info("  [Bias] After instruction bias: mean=%.3f, std=%.3f",
-             biased_action.mean(), biased_action.std())
+    # Instruction bias only makes the zero-action stub responsive; a learned
+    # policy's actions are served unmodified (biasing them breaks its gait).
+    bias_applied = isinstance(served_policy, _StubPolicy)
+    if bias_applied:
+        biased_action = apply_instruction_bias(raw_action, instruction)
+        log.info("  [Bias] Stub policy: instruction bias applied")
+    else:
+        biased_action = raw_action  # robots clip each actuator to its ctrlrange, as in training
 
     # Convert to fleet joint schema
     predicted_actions = mujoco_to_fleet_actions(biased_action)
@@ -755,6 +866,7 @@ def run_inference(observation: list | None, instruction: str, model_id: str, emb
         "action_dim": MUJOCO_ACTION_DIM,
         "latency_ms": round(total_ms, 1),
         "fallback": fallback,
+        "bias_applied": bias_applied,
     }
 
 

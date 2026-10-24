@@ -15,10 +15,11 @@ const (
 	ActionDim      = 25
 )
 
-// Prefix is where transition batches live in the telemetry bucket.
-// Records gained the full policy observation in format v2; older records
-// (directly under training_data/) are never used for training.
-const Prefix = "training_data/v2/"
+// Prefix is where transition batches live in the telemetry bucket. The
+// version tracks the observation layout: v3 = egocentric observations
+// (observation.py OBS_VERSION 3). Older records (v2: world-frame
+// observations; pre-v2: no observation) are never used for training.
+const Prefix = "training_data/v3/"
 
 // TransitionsPerBatch is how many transitions the processor buffers per robot
 // before flushing a batch file (partial batches are flushed periodically).

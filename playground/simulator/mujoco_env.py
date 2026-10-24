@@ -13,6 +13,8 @@ from pathlib import Path
 import mujoco
 import numpy as np
 
+from locomotion_reward import FALL_PENALTY, MAX_EPISODE_STEPS, control_cost, has_fallen, locomotion_reward
+
 from joint_mapping import extract_joint_states, extract_root_pose, MUJOCO_QPOS_OFFSET
 
 log = logging.getLogger(__name__)
@@ -28,6 +30,7 @@ JOINT_QPOS_SIZE = 25
 JOINT_QVEL_SIZE = 25
 BODY_QPOS_SIZE = ROOT_QPOS_SIZE + JOINT_QPOS_SIZE  # 32
 BODY_QVEL_SIZE = ROOT_QVEL_SIZE + JOINT_QVEL_SIZE   # 31
+RESET_WALL_MARGIN = 1.0  # m: a robot ending closer than this to a wall respawns
 
 
 
@@ -45,6 +48,9 @@ class LabSimulation:
         """Load or reload the MuJoCo model from an XML string."""
         self.model = mujoco.MjModel.from_xml_string(xml_string)
         self.data = mujoco.MjData(self.model)
+        # Robots that end beyond this |x|, |y| respawn (the walls sit at the floor's edge).
+        floor_half_size = self.model.geom_size[self.model.geom("floor").id][0]
+        self._reset_limit = float(floor_half_size) - RESET_WALL_MARGIN
 
         # Rebuild robot tracking using mj_name2id for correct offsets.
         # Dynamic objects (red_box, blue_cylinder) have freejoints that
@@ -79,6 +85,7 @@ class LabSimulation:
                 "reward_accum": 0.0,
                 "episode_steps": 0,
                 "fall_count": 0,
+                "truncation_count": 0,
                 "episode_count": 0,
                 "total_reward": 0.0,
                 "total_steps": 0,
@@ -299,6 +306,13 @@ class LabSimulation:
         """Current simulation time in seconds."""
         return self.data.time
 
+    def action_bounds(self, robot_id: str) -> tuple[np.ndarray, np.ndarray]:
+        """Per-actuator (low, high) control range for a robot, from the scene."""
+        robot = self._find_robot(robot_id)
+        start = robot["actuator_start"]
+        ranges = self.model.actuator_ctrlrange[start:start + NUM_ACTUATORS]
+        return ranges[:, 0], ranges[:, 1]
+
     def step(self, actions: dict[str, np.ndarray], task_commands: dict[str, str] | None = None,
              n_substeps: int = 7):
         """Advance physics by n_substeps to match real-time at 50 Hz control rate.
@@ -311,13 +325,14 @@ class LabSimulation:
         if task_commands is None:
             task_commands = {}
 
-        # Apply actions to actuators (held constant across sub-steps)
+        # Apply actions to actuators (held constant across sub-steps), clipped
+        # to each actuator's control range exactly like the training env.
         for robot in self.robots:
             rid = robot["id"]
             if rid in actions:
-                action = np.clip(actions[rid], -1.0, 1.0)
+                low, high = self.action_bounds(rid)
                 start = robot["actuator_start"]
-                self.data.ctrl[start:start + NUM_ACTUATORS] = action
+                self.data.ctrl[start:start + NUM_ACTUATORS] = np.clip(actions[rid], low, high)
 
         for _ in range(n_substeps):
             mujoco.mj_step(self.model, self.data)
@@ -336,18 +351,23 @@ class LabSimulation:
             cmd = task_commands.get(robot["id"], "idle")
 
             ctrl = self.data.ctrl[acts:acts + NUM_ACTUATORS]
-            control_cost = 0.1 * float(np.sum(ctrl ** 2))
+            ctrl_cost = control_cost(ctrl)
 
-            reward = self._compute_reward(robot, cmd, height, x_pos, dt, control_cost)
+            reward = self._compute_reward(robot, cmd, height, x_pos, dt, ctrl_cost)
             robot["prev_x"] = x_pos
             robot["reward_accum"] += reward
             robot["cum_reward"] += reward
             robot["episode_steps"] += 1
             robot["total_steps"] += 1
 
-            # Fall detection and reset
-            if height < 0.3:
-                robot["fall_count"] += 1
+            # Episode end and reset: a fall, or the test track's time limit
+            # (truncation, so a robot can't idle or lean somewhere forever).
+            fell = has_fallen(height)
+            if fell or robot["episode_steps"] >= MAX_EPISODE_STEPS:
+                if fell:
+                    robot["fall_count"] += 1
+                else:
+                    robot["truncation_count"] += 1
                 robot["episode_count"] += 1
                 robot["total_reward"] += robot["reward_accum"]
                 robot["reward_accum"] = 0.0
@@ -363,7 +383,7 @@ class LabSimulation:
                 robot["status"] = "active"
 
     def _compute_reward(self, robot: dict, cmd: str, height: float,
-                        x_pos: float, dt: float, control_cost: float) -> float:
+                        x_pos: float, dt: float, ctrl_cost: float) -> float:
         """Task-conditional reward.
 
         Different commands get different reward signals:
@@ -373,32 +393,32 @@ class LabSimulation:
         - wave/dance/bow/etc: small reward for staying upright during gesture
         """
         # Penalty for falling applies to all tasks
-        if height < 0.4:
-            return -10.0
+        if has_fallen(height):
+            return FALL_PENALTY
 
         if cmd in ("move", "move_relative", "walk"):
-            # Locomotion: reward forward movement
+            # Locomotion: identical to the training env / test track
             forward_vel = (x_pos - robot["prev_x"]) / dt if dt > 0 else 0.0
-            return forward_vel + 1.0 - control_cost  # reduced alive bonus (1.0 vs old 5.0)
+            return locomotion_reward(forward_vel, height, ctrl_cost)
 
         if cmd in ("reach", "pick_up", "grasp"):
             # Manipulation: reward hand-object proximity
             hand_dist = self._hand_object_distance(robot)
             if hand_dist is not None:
-                return -hand_dist - 0.1 * control_cost  # closer = better
-            return -1.0 - 0.1 * control_cost
+                return -hand_dist - 0.1 * ctrl_cost  # closer = better
+            return -1.0 - 0.1 * ctrl_cost
 
         if cmd in ("wave", "dance", "bow", "sit", "jump", "stretch", "look_around"):
             # Gesture: small reward for staying upright, no free points
             upright = 1.0 if height > 0.8 else 0.0
-            return upright * 0.5 - control_cost
+            return upright * 0.5 - ctrl_cost
 
         if cmd in ("idle", "stop"):
             # Idle: no reward. Robot should not be rewarded for standing still.
-            return -0.01 - 0.1 * control_cost
+            return -0.01 - 0.1 * ctrl_cost
 
         # Unknown command: small negative to discourage doing nothing
-        return -0.01 - control_cost
+        return -0.01 - ctrl_cost
 
     def _hand_object_distance(self, robot: dict) -> float | None:
         """Distance from right hand site to nearest dynamic object site."""
@@ -423,15 +443,19 @@ class LabSimulation:
         qpos_start = robot["qpos_start"]
         qvel_start = robot["qvel_start"]
 
-        # Standing pose: position at (x, y, 1.4), upright quaternion
-        current_x = self.data.qpos[qpos_start]
-        current_y = self.data.qpos[qpos_start + 1]
+        # Stand up where the robot fell; near a wall, go back to its spawn point
+        # instead (stood up at a wall, it leans on it above the fall height).
+        current_x, current_y = self.data.qpos[qpos_start:qpos_start + 2]
+        limit = self._reset_limit
+        if abs(current_x) > limit or abs(current_y) > limit:
+            current_x, current_y = self.model.qpos0[qpos_start:qpos_start + 2]
         self.data.qpos[qpos_start:qpos_start + BODY_QPOS_SIZE] = 0.0
         self.data.qpos[qpos_start + 0] = current_x  # keep x
         self.data.qpos[qpos_start + 1] = current_y  # keep y
         self.data.qpos[qpos_start + 2] = 1.22        # standing height (feet at floor)
         self.data.qpos[qpos_start + 3] = 1.0         # quaternion w
         self.data.qvel[qvel_start:qvel_start + BODY_QVEL_SIZE] = 0.0
+        robot["prev_x"] = float(current_x)  # a respawn is not forward progress
 
         if self.steps % 500 == 0:
             log.info("Reset %s at step %d", robot["id"], self.steps)

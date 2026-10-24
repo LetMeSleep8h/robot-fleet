@@ -208,6 +208,7 @@ func main() {
 	defer deployEventConsumer.Close()
 	agentHandler.SetDeploymentEventConsumer(deployEventConsumer)
 
+	policyHandler := api.NewPolicyHandler(service.NewPolicyService(pg, pg))
 	trainingHandler := api.NewTrainingHandler(trainingSvc)
 	// Full MLOps pipeline ([Katib] → train → evaluate → gate → register → canary).
 	pipelineHandler := api.NewPipelineHandler(service.NewPipelineService(temporalClient))
@@ -238,6 +239,8 @@ func main() {
 	authedMux.HandleFunc("POST /api/v1/robots/{id}/command", handler.SendCommand)
 	authedMux.HandleFunc("GET /api/v1/robots/{id}/commands", handler.GetCommandHistory)
 	authedMux.HandleFunc("GET /api/v1/robots/{id}/telemetry", handler.GetTelemetry)
+	// Robots poll which low-level policy to execute locally (edge execution).
+	authedMux.HandleFunc("GET /api/v1/robots/{id}/policy", policyHandler.GetRobotPolicy)
 	authedMux.HandleFunc("POST /api/v1/inference", handler.RunInference)
 	authedMux.HandleFunc("GET /api/v1/fleet/metrics", handler.GetFleetMetrics)
 	authedMux.HandleFunc("GET /api/v1/usage", handler.GetUsage)

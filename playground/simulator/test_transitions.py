@@ -26,11 +26,12 @@ def test_exploration_fraction_bounds(fraction, expected):
 def test_explorer_adds_bounded_noise_only_for_exploration_robots():
     ex = Explorer(fraction=1.0, std=0.5, rng=np.random.default_rng(0))
     action = np.full(25, 0.9, dtype=np.float32)
-    noisy, explored = ex.apply("robot-0001", action, refresh=True)
+    bounds = (np.full(25, -1.0, dtype=np.float32), np.full(25, 1.0, dtype=np.float32))
+    noisy, explored = ex.apply("robot-0001", action, refresh=True, bounds=bounds)
     assert explored
     assert noisy.shape == (25,)
     assert not np.allclose(noisy, action)
-    assert noisy.min() >= -1.0 and noisy.max() <= 1.0  # clipped to the action space
+    assert noisy.min() >= -1.0 and noisy.max() <= 1.0  # clipped to the given bounds
 
     calm = Explorer(fraction=0.0, std=0.5, rng=np.random.default_rng(0))
     same, explored = calm.apply("robot-0001", action, refresh=True)

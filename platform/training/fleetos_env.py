@@ -17,13 +17,12 @@ from gymnasium import spaces
 from gymnasium.envs.registration import register
 
 from observation import build_observation_from_mujoco, OBS_DIM, NUM_ACTUATORS
+from locomotion_reward import MAX_EPISODE_STEPS, control_cost, has_fallen, locomotion_reward
 
 ASSETS_DIR = Path(__file__).parent / "assets"
 LAB_XML = ASSETS_DIR / "lab_room.xml"
 
 N_SUBSTEPS = 7  # 0.003s × 7 = 0.021s per step
-CTRL_COST_WEIGHT = 0.1
-FALL_Z = 0.3
 
 
 class FleetOSHumanoidEnv(gym.Env):
@@ -31,7 +30,7 @@ class FleetOSHumanoidEnv(gym.Env):
 
     metadata = {"render_modes": ["rgb_array"], "render_fps": 50}
 
-    def __init__(self, render_mode=None, max_episode_steps=1000):
+    def __init__(self, render_mode=None, max_episode_steps=MAX_EPISODE_STEPS):
         super().__init__()
 
         if not LAB_XML.exists():
@@ -60,6 +59,23 @@ class FleetOSHumanoidEnv(gym.Env):
 
         self._prev_x = 0.0
 
+        # Scenario conditions (evaluate_policy.SCENARIO_PRESETS); scene defaults until set.
+        self._torso_id = self.model.body("torso").id
+        self._base_sliding_friction = self.model.geom_friction[:, 0].copy()
+        self._wind = 0.0
+
+    def set_conditions(self, gravity: float, friction: float, wind: float):
+        """Physics for a test-track scenario, kept across resets.
+
+        gravity: vertical acceleration (m/s², negative is down).
+        friction: multiplier on every geom's sliding friction from the scene.
+        wind: constant lateral force on the torso (N, +y: a side gust).
+        """
+        self.model.opt.gravity[:] = (0.0, 0.0, gravity)
+        self.model.geom_friction[:, 0] = self._base_sliding_friction * friction
+        self._wind = wind
+        self.data.xfrc_applied[self._torso_id, :3] = (0.0, wind, 0.0)
+
     def _get_obs(self) -> np.ndarray:
         """Build unified 86-dim observation from MuJoCo state."""
         return build_observation_from_mujoco(
@@ -81,6 +97,9 @@ class FleetOSHumanoidEnv(gym.Env):
         joint_end = joint_start + NUM_ACTUATORS
         noise = self.np_random.uniform(-0.01, 0.01, size=NUM_ACTUATORS)
         self.data.qpos[joint_start:joint_end] += noise
+
+        # mj_resetData clears applied forces; wind persists across episodes.
+        self.data.xfrc_applied[self._torso_id, :3] = (0.0, self._wind, 0.0)
 
         mujoco.mj_forward(self.model, self.data)
 
@@ -108,14 +127,11 @@ class FleetOSHumanoidEnv(gym.Env):
         forward_velocity = (x_pos - self._prev_x) / dt
         self._prev_x = x_pos
 
-        ctrl_cost = CTRL_COST_WEIGHT * float(np.sum(action ** 2))
-
-        if height < FALL_Z:
-            reward = -10.0
-        else:
-            reward = forward_velocity + 1.0 - ctrl_cost
-
-        terminated = height < FALL_Z
+        ctrl_cost = control_cost(action)
+        # Shared with the robots (locomotion_reward.py) so the test track
+        # scores and terminates exactly like the fleet.
+        reward = locomotion_reward(forward_velocity, height, ctrl_cost)
+        terminated = has_fallen(height)
         truncated = self._step_count >= self._max_episode_steps
 
         info = {
@@ -143,5 +159,5 @@ def register_fleetos_env():
     register(
         id="FleetOS-Humanoid-v2",
         entry_point="fleetos_env:FleetOSHumanoidEnv",
-        max_episode_steps=1000,
+        max_episode_steps=MAX_EPISODE_STEPS,
     )

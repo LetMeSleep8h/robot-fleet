@@ -7,7 +7,8 @@ A distributed robot fleet management platform built on a **cloud-brain architect
 - **Real-time Telemetry Pipeline** -- Humanoid robots stream 20-DOF joint states, LiDAR, video, and audio over gRPC into Kafka, processed into Redis (hot state) + S3 (raw storage)
 - **Developer API Platform** -- REST, WebSocket, and gRPC APIs with OpenAPI 3.1 spec, TypeScript + Python SDKs
 - **Multi-tenant Auth & Billing** -- JWT + OAuth2/OIDC + API key authentication, RBAC (4 roles), per-tenant rate limiting, usage metering, 3-tier pricing (free/pro/enterprise)
-- **AI Inference** -- SB3 PPO/SAC policy serving with instruction bias, loads models from S3/MinIO, hot-swaps on deployment
+- **Edge policy execution** -- robots run their assigned walking policy locally every control tick (the timing it was trained at); the platform decides which model via `GET /api/v1/robots/{id}/policy` (canary assignment, else the deployed fleet model)
+- **AI Inference** -- SB3 PPO/SAC policy serving for API requests and non-locomotion commands; applies each model's observation normalisation; instruction bias only for the zero-action stub; loads models from S3/MinIO, hot-swaps on deployment
 - **Durable Command Pipeline** -- Commands published to Kafka (`robot.commands`), consumed by processor, orchestrated via Temporal workflows with audit trail, ack tracking, retries, and timeout handling
 - **Semantic Commands** -- Natural language robot control via extensible command registry (strategy pattern), with FAISS-backed resolution for unmatched instructions (searches fleet state to resolve spatial commands like "go where the idle robots are")
 - **Model Registry** -- Model lifecycle management (staged -> canary -> deployed -> archived) with S3 artifact storage, canary deployment via Temporal workflows
@@ -147,6 +148,7 @@ open http://localhost:8123   # ClickHouse (direct SQL)
 | `GET` | `/api/v1/robots/{id}` | Get robot (hot state + inference_model_id) |
 | `POST` | `/api/v1/robots/{id}/command` | Send command → Kafka → Temporal workflow |
 | `GET` | `/api/v1/robots/{id}/commands` | Command history with audit trail |
+| `GET` | `/api/v1/robots/{id}/policy` | Policy the robot should run locally (canary assignment, else deployed fleet model; 404 if none) |
 | `POST` | `/api/v1/inference` | AI inference (uses robot's assigned model) |
 | `GET` | `/api/v1/fleet/metrics` | Aggregated fleet stats |
 | `POST` | `/api/v1/models` | Register model (staged) |
@@ -239,7 +241,8 @@ Instruction ("wave hello") + Optional observation (376-dim MuJoCo state)
     |
 SB3 PPO Policy -- predict() → 17-dim MuJoCo action vector
     |
-Instruction Bias -- overlay command-specific joint targets (wave, dance, walk...)
+Instruction Bias -- only when no trained model is loaded (zero-action stub);
+                    a learned policy's actions are returned unmodified
     |
 MuJoCo-to-Fleet Mapping -- 17 actuators → 20 joint schema
     |
@@ -261,7 +264,7 @@ The pipeline learns from what the robots actually did — not from a simulator. 
 ```
 Temporal TrainingPipelineWorkflow (fleetos-training queue)
   │
-  ├─ SnapshotDataset — lists s3://fleetos-telemetry/training_data/v2/ (TELEMETRY_BUCKET),
+  ├─ SnapshotDataset — lists s3://fleetos-telemetry/training_data/v3/ (TELEMETRY_BUCKET),
   │     keeps the newest max_dataset_files batches, requires min_transitions (default 1000),
   │     writes datasets/<job>/manifest.json to the models bucket
   │     → too little data stops here (phase "insufficient_data", not a failure)
@@ -324,7 +327,7 @@ Simulator (50 Hz physics, 10 Hz telemetry)
     episode_id, step, exploration flag (terminal record on every fall)
   → EXPLORATION_FRACTION (default 0.2, deterministic per robot) adds N(0, EXPLORATION_STD=0.1) noise
   → Kafka → Processor (internal/experience), 100 transitions per robot per batch
-  → s3://fleetos-telemetry/training_data/v2/YYYY/MM/DD/HH/<robot_id>/transitions_<ns>.ndjson
+  → s3://fleetos-telemetry/training_data/v3/YYYY/MM/DD/HH/<robot_id>/transitions_<ns>.ndjson
 ```
 
 Records from before format v2 (directly under `training_data/YYYY/…`, no observation) are never used for training. `train_bc.py` and `train_autoencoder.py` still read the old `experience/` prefix, which nothing writes anymore.
@@ -381,7 +384,7 @@ python train_autoencoder.py --job-id ae-001 --experience-prefix experience/ \
 | GPU node group | g5.2xlarge, 0-8, scale-from-zero (designed, not verified) | Training jobs on AWS |
 | Kubeflow namespace | Created by Terraform; Trainer/Katib must be installed separately | ML workloads isolation |
 | IAM role (IRSA) | S3 read/write on models + training-data | Secure artifact access |
-| S3 lifecycle | training-data bucket → Glacier 30d → delete 180d (Terraform; fleet experience currently lives in the telemetry bucket under `training_data/v2/`) | Cost management |
+| S3 lifecycle | training-data bucket → Glacier 30d → delete 180d (Terraform; fleet experience currently lives in the telemetry bucket under `training_data/v3/`) | Cost management |
 | Katib (Helm `kubeflow.hpo`) | TPE by default, 4 trials × 2 parallel, 2,000 offline updates + 5 test-track episodes per trial (local budget) | Hyperparameter search |
 
 ## Testing

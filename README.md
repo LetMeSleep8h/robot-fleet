@@ -31,10 +31,10 @@ robot-fleet/
 - **Real-time Telemetry Pipeline** — Humanoid robots stream 20-DOF joint states, LiDAR, video, and audio over gRPC into Kafka, processed into Redis (hot state) + S3 (raw storage)
 - **Developer API Platform** — REST, WebSocket, and gRPC APIs with OpenAPI 3.1 spec, TypeScript + Python SDKs
 - **Admin Console** — React SPA at `/admin/` for tenant management, API key lifecycle (create/revoke), and billing overview
-- **Multi-tenant Auth & Billing** — JWT + OAuth2/OIDC + DB-backed API key auth, RBAC (4 roles), per-tenant rate limiting, usage metering, Temporal-based billing workflows with dunning
+- **Multi-tenant Auth & Billing** — JWT + OAuth2/OIDC + DB-backed API key auth, RBAC (4 roles), per-tenant rate limiting, usage metering, Temporal-based billing workflows with dunning. Robot control-plane calls (`GET /api/v1/robots/{id}/policy`) are rate-limited but never billed or blocked by a tenant's API quota, so robots keep their model when the quota runs out
 - **AI Inference** — SB3 PPO/SAC policy serving with hot model swap and per-request model routing (each robot's assigned model artifact, LRU policy cache), so canary robots are really served by the canary policy
 - **Learning from the Fleet (offline RL)** — The training pipeline learns from what the robots actually did, not from a simulator: snapshot fleet experience → [Katib HPO] → offline CQL-SAC (Argo Workflows or Kubeflow Trainer) → evaluate on the MuJoCo *test track* → evaluation gate → register (with data lineage) → canary deploy. Started via `POST /api/v1/training/pipelines`. MuJoCo is used for evaluation only
-- **Fleet Experience Data** — Every telemetry packet carries a training context: the exact 86-dim policy observation, applied action, reward, episode id/step, and an exploration flag. The processor writes it to `s3://fleetos-telemetry/training_data/v2/…` NDJSON batches; each training run pins its data in a dataset manifest. A configurable fraction of robots (default 20%) adds exploration noise so the data isn't limited to the current policy
+- **Fleet Experience Data** — Every telemetry packet carries a training context: the exact 86-dim policy observation, applied action, reward, episode id/step, and an exploration flag. The processor writes it to `s3://fleetos-telemetry/training_data/v3/…` NDJSON batches; each training run pins its data in a dataset manifest. A configurable fraction of robots (default 20%) adds exploration noise so the data isn't limited to the current policy
 - **Manual (online) training tools** — PPO locomotion and SAC+HER reaching in MuJoCo (`train_locomotion.py`, `train_reach.py`, `make k3s-train`, `POST /api/v1/locomotion/jobs`) remain for bootstrapping a first policy; grasping, BC and autoencoder scripts run standalone
 - **Kubeflow Integration** — Kubeflow Trainer v2 `TrainJob`s on a FleetOS `ClusterTrainingRuntime`, and Katib (TPE by default) searching offline hyperparameters (learning rate, CQL α, batch size), each trial scored on the test track; the best trial's parameters train the final model. Verified on local k3s (CPU). The AWS design (GPU node group, IRSA) is in Terraform but not verified, and Terraform does not install Trainer/Katib
 - **Evaluation Gate + Canary Deployment** — Models must pass the eval gate (pass rate ≥ 0.5, reward ≤ 5% below the deployed model) to be registered or deployed; deploys roll out progressively (assign 5% → observe → 25% → 50% → 100%) via Temporal with deterministic robot selection, live success_rate comparison, and automatic rollback
@@ -42,6 +42,7 @@ robot-fleet/
 - **Durable Command Pipeline** — Commands flow through Kafka into Temporal workflows with full audit trail, ack tracking via Kafka topics, and automatic retries
 - **Semantic Commands** — Natural language robot control via extensible command registry (strategy pattern)
 - **Model Registry** — Model lifecycle (staged → canary → deployed → archived) with S3 artifacts and per-robot model assignment
+- **Edge Policy Execution** — Robots run their assigned walking policy locally every control tick (47.6 Hz, as trained) instead of asking the cloud ~10×/s with stale observations; the platform still decides which model each robot runs (`GET /api/v1/robots/{id}/policy`, canary-aware). Robots and the test track share the observation builder, scene and reward/fall rule, enforced byte-for-byte by `platform/training/test_parity.py`. Observations are egocentric (relative to the robot, version 3), and every policy carries `policy_meta.json` so robots and inference refuse a policy built for a different observation layout
 - **Analytics Pipeline** — S3 (raw NDJSON) → Spark (batch) → ClickHouse (OLAP) → Redis (cache) → API
 - **ROS 2 Integration** — Bridge node publishing to standard ROS 2 topics (JointState, PoseStamped, BatteryState, LaserScan)
 - **Cloud-native Infrastructure** — Kubernetes, Helm, Terraform (AWS), Docker Compose, Istio service mesh (mTLS)
@@ -79,7 +80,7 @@ robot-fleet/
 │    ├─ BillingCycleWorkflow (monthly invoicing)   │
 │    └─ WebhookFanoutWorkflow                      │
 │  Processor → Postgres/Redis/S3/ClickHouse        │
-│    ├─ Fleet experience → S3 training_data/v2/    │
+│    ├─ Fleet experience → S3 training_data/v3/    │
 │    └─ Performance metrics → model registry       │
 │  Training compute (offline, from fleet data)     │
 │    ├─ Argo Workflows (train → evaluate)          │
@@ -224,6 +225,7 @@ curl -X POST -H "X-API-Key: dev-key-001" -H "Content-Type: application/json" \
 | `GET` | `/api/v1/robots/{id}` | Get robot (hot state + model assignment) |
 | `POST` | `/api/v1/robots/{id}/command` | Send command → Kafka → Temporal |
 | `GET` | `/api/v1/robots/{id}/commands` | Command history with audit trail |
+| `GET` | `/api/v1/robots/{id}/policy` | Policy the robot should run locally (canary assignment, else deployed fleet model; 404 if none) |
 | `POST` | `/api/v1/inference` | AI inference (uses robot's assigned model) |
 | `GET` | `/api/v1/robots/{id}/telemetry` | Recent telemetry |
 | `GET` | `/api/v1/fleet/metrics` | Aggregated fleet stats |
@@ -289,7 +291,7 @@ Tenant created → Temporal BillingCycleWorkflow (monthly, continue-as-new)
 ### ML Training Pipeline (offline, from fleet experience)
 ```
 POST /api/v1/training/pipelines → Temporal TrainingPipelineWorkflow (queue fleetos-training)
-  ├─ SnapshotDataset — list s3://fleetos-telemetry/training_data/v2/, keep the newest
+  ├─ SnapshotDataset — list s3://fleetos-telemetry/training_data/v3/, keep the newest
   │     max_dataset_files batches, require min_transitions (default 1000), write
   │     datasets/<job>/manifest.json (models bucket). Too little data → phase "insufficient_data"
   ├─ [use_katib] RunHyperparameterSearch — Katib Experiment (TPE, 4 trials × 2 parallel) over
@@ -332,7 +334,7 @@ to the data path (larger telemetry, storage) and to heavier updates.
 **Limits:** offline RL can't get much better than the fleet's own behaviour, so data quality and
 exploration bound it (a walking bootstrap policy from manual online training makes fleet data
 useful); evaluation still needs MuJoCo; rewards are computed by the simulator (real robots would
-need rewards derived from telemetry); snapshots list the whole `training_data/v2/` prefix (fine
+need rewards derived from telemetry); snapshots list the whole `training_data/v3/` prefix (fine
 locally, needs date-range filtering at fleet scale).
 
 ### RL Feedback Loop (Closed)
@@ -342,7 +344,7 @@ Robots run (simulation today)
     fraction of robots (EXPLORATION_FRACTION, default 0.2) adds exploration noise
   → Telemetry training context: exact 86-dim observation, applied action, reward,
     episode_id/step, exploration flag → Kafka → Processor
-  → Processor → s3://fleetos-telemetry/training_data/v2/YYYY/MM/DD/HH/<robot>/transitions_*.ndjson
+  → Processor → s3://fleetos-telemetry/training_data/v3/YYYY/MM/DD/HH/<robot>/transitions_*.ndjson
   → Processor aggregates uptime → model registry success_rate
                                                     ↓
   POST /api/v1/training/pipelines (success_rate monitor designed, not started yet)

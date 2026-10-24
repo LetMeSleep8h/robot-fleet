@@ -21,7 +21,7 @@ Platform services (simulator lives in `playground/`):
 - **api** (`cmd/api/`) — REST API + WebSocket + auth + rate limiting + billing
 - **processor** (`cmd/processor/`) — Kafka consumer → Postgres/Redis/S3/ClickHouse; starts Temporal command workflows
 - **worker** (`cmd/worker/`) — Temporal worker (command dispatch, canary model deployment, training pipeline, billing, webhook workflows)
-- **training** (`training/`) — The Temporal pipeline trains OFFLINE from fleet experience: dataset snapshot of `training_data/v2/` → [Katib HPO] → `train_offline.py` (CQL-SAC, no simulator) as Argo template `fleetos-offline-training` or Kubeflow Trainer TrainJobs (runtime `fleetos-sb3`) → `evaluate_policy.py` on the MuJoCo test track (eval only). Online MuJoCo scripts (PPO `train_locomotion.py`, SAC+HER `train_reach.py`) remain as manual bootstrap tools; BC/autoencoder run standalone
+- **training** (`training/`) — The Temporal pipeline trains OFFLINE from fleet experience: dataset snapshot of `training_data/v3/` → [Katib HPO] → `train_offline.py` (CQL-SAC, no simulator) as Argo template `fleetos-offline-training` or Kubeflow Trainer TrainJobs (runtime `fleetos-sb3`) → `evaluate_policy.py` on the MuJoCo test track (eval only). Online MuJoCo scripts (PPO `train_locomotion.py`, SAC+HER `train_reach.py`) remain as manual bootstrap tools; BC/autoencoder run standalone
 - **inference** (`inference/`, deployed in platform stack) — SB3 PPO policy serving + FAISS semantic command resolution, loads models from S3
 
 Also: `cmd/fleetos/` (cobra CLI client), `admin-web/` (React admin console served at `/admin/`).
@@ -98,7 +98,7 @@ make k3s-down      # colima stop (MinIO PVC survives)
 | `internal/kube/` | Minimal in-cluster Kubernetes REST client (create/get custom resources) |
 | `internal/kubeflow/` | Kubeflow Trainer TrainJob + Katib Experiment builders and status parsing |
 | `internal/modelgate/` | Promotion gate (eval pass rate + reward vs deployed baseline) |
-| `internal/experience/` | Fleet experience records + S3 keys (`training_data/v2/`) written by the processor, read by offline training |
+| `internal/experience/` | Fleet experience records + S3 keys (`training_data/v3/`) written by the processor, read by offline training |
 | `internal/temporal/` | Temporal client, workflows, activities, Kafka ack bridge |
 | `internal/billing/` | Pricing tiers |
 | `internal/circuitbreaker/` | Circuit breaker for downstream calls |
@@ -236,6 +236,9 @@ make k3s-down      # colima stop (MinIO PVC survives)
 - Model versions are stored with `artifact_url` (S3 path), `metrics` (JSONB), and deployment timestamps.
 - The inference service loads models from S3 via the registry API; API inference requests carry the robot's assigned `artifact_url` (canary routing).
 - Promotion is gated (`internal/modelgate`): `POST /models/{id}/deploy` rejects unevaluated/failing models (422) and otherwise starts the Temporal canary (`ModelDeploymentWorkflow`); only its final step (`PromoteModel`) marks a model deployed.
+- Train/serve parity: robots and the test track share `observation.py`, `locomotion_reward.py`, `policy_meta.py` and `assets/lab_room.xml` (byte-identical copies in `platform/training/` and `playground/simulator/`, enforced by `platform/training/test_parity.py`). Change both copies together.
+- Robots end episodes like the test track: a fall or `MAX_EPISODE_STEPS` (1000 ticks, a truncation — no fall penalty, no terminal experience record). A robot stands up where it fell, or at its spawn point if it ended within `RESET_WALL_MARGIN` of a wall.
+- Observations are egocentric (`OBS_VERSION` 3): positions relative to the torso, vectors in the robot's heading frame, yaw removed — the same pose reads the same anywhere in the room. Every trainer writes `policy_meta.json` (`{"obs_version": N}`) next to `policy.zip`; robots, inference and the test track refuse policies without it or with another version. Changing the observation layout means bumping `OBS_VERSION` (both copies + `inference/server.py`), bumping the experience prefix in `internal/experience/transition.go`, and retraining.
 - Pipeline-trained models record their data lineage in `metrics` (`dataset_manifest`, `dataset_files`): the exact fleet-experience batches (`datasets/<job>/manifest.json`) they were trained on.
 
 ### SDK Requirements
@@ -263,7 +266,7 @@ Key variables (all have defaults for local dev):
 | `MODEL_MIN_EVAL_PASS_RATE` | 0.5 | Promotion gate: minimum eval scenario pass rate |
 | `KUBEFLOW_ENABLED` | false | Worker submits Kubeflow TrainJobs / Katib Experiments (needs Trainer + Katib installed) |
 | `HPO_ALGORITHM` | tpe | Katib algorithm (also `HPO_MAX_TRIALS`=4, `HPO_PARALLEL_TRIALS`=2, `HPO_TRIAL_GRADIENT_STEPS`=2000, `HPO_EVAL_EPISODES`=5, `KUBEFLOW_TRAINING_SECRET`=fleetos-training) |
-| `TELEMETRY_BUCKET` | fleetos-telemetry | Worker: bucket holding fleet experience (`training_data/v2/`) for dataset snapshots |
+| `TELEMETRY_BUCKET` | fleetos-telemetry | Worker: bucket holding fleet experience (`training_data/v3/`) for dataset snapshots |
 
 ## API Authentication
 

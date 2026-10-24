@@ -11,6 +11,9 @@ services:
       GRPC_TARGET: "${PLATFORM_HOST:?set PLATFORM_HOST to the Colima VM IP}:30051"
       INFERENCE_URL: "http://${PLATFORM_HOST}:30081"
       S3_ENDPOINT: "${PLATFORM_HOST}:30900"
+      PLATFORM_API_URL: "http://${PLATFORM_HOST}:30880"
+      EDGE_POLICY: "${EDGE_POLICY:-true}"
+      EXPLORATION_FRACTION: "${EXPLORATION_FRACTION:-0.2}"
 
   web:
     environment:

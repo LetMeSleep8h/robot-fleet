@@ -23,7 +23,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "gen"))
 from proto.telemetry_pb2 import CommandRequest
 from proto.telemetry_pb2_grpc import TelemetryServiceStub
 
-from joint_mapping import FLEET_TO_MUJOCO_ACTUATOR
+from joint_mapping import joint_actions_to_array
 
 log = logging.getLogger(__name__)
 
@@ -188,15 +188,8 @@ class CommandHandler:
 
     def _apply_inference_actions(self, params: dict) -> np.ndarray:
         """Apply joint torques from inference predicted_actions directly."""
-        action = self._idle_action(0)  # start from stable base
-        actions = params.get("actions", [])
-        for a in actions:
-            joint_name = a.get("joint", "")
-            torque = a.get("torque", 0.0)
-            if joint_name in FLEET_TO_MUJOCO_ACTUATOR:
-                idx = FLEET_TO_MUJOCO_ACTUATOR[joint_name]
-                action[idx] = np.clip(torque, -1.0, 1.0)
-        return action
+        # Start from a stable base; physics clips each actuator to its range.
+        return joint_actions_to_array(params.get("actions", []), self._idle_action(0))
 
     def _idle_action(self, t: float) -> np.ndarray:
         """Standing pose: target joint angles in radians.

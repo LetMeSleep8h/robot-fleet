@@ -46,13 +46,15 @@ class TransitionRecorder:
         self._next_step += 1
         return out
 
-    def after_step(self, cum_reward: float, fell: bool) -> list[dict]:
+    def after_step(self, cum_reward: float, fell: bool, truncated: bool = False) -> list[dict]:
         """Call after the physics step. A fall closes the open transition as
-        terminal and starts a new episode."""
-        if not fell:
+        terminal and starts a new episode. A truncation (time limit) also starts
+        a new episode but drops the open transition: it isn't terminal, and its
+        successor observation belongs to the reset robot."""
+        if not (fell or truncated):
             return []
         out = []
-        if self._pending is not None:
+        if fell and self._pending is not None:
             out.append(self._close(cum_reward, done=True))
         self.episode_id = _new_episode_id()
         self._next_step = 0

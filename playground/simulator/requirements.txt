@@ -6,3 +6,7 @@ protobuf>=5.27
 numpy>=1.26
 minio>=7.2
 requests>=2.31
+# Edge policy execution (robots run their assigned policy locally)
+stable-baselines3>=2.3
+--extra-index-url https://download.pytorch.org/whl/cpu
+torch>=2.2

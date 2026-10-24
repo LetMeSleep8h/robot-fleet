@@ -72,7 +72,7 @@ func (s *PostgresStore) GetRobot(ctx context.Context, id string) (*RobotRecord, 
 		FROM robots WHERE id = $1
 	`, id).Scan(&r.ID, &r.Name, &r.Model, &r.Status, &r.PosX, &r.PosY, &r.PosZ, &r.BatteryLevel, &r.LastSeen, &r.RegisteredAt, &r.TenantID, &inferenceModelID)
 	if err != nil {
-		return nil, fmt.Errorf("get robot %s: %w", id, err)
+		return nil, fmt.Errorf("get robot %s: %w", id, notFoundOr(err))
 	}
 	if inferenceModelID != nil {
 		r.InferenceModelID = *inferenceModelID
