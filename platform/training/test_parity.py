@@ -17,7 +17,7 @@ SIMULATOR = REPO / "playground" / "simulator"
 pytestmark = pytest.mark.skipif(not SIMULATOR.is_dir(), reason="playground/simulator not present in this checkout")
 
 
-@pytest.mark.parametrize("rel", ["observation.py", "locomotion_reward.py", "assets/lab_room.xml"])
+@pytest.mark.parametrize("rel", ["observation.py", "locomotion_reward.py", "policy_meta.py", "assets/lab_room.xml"])
 def test_simulator_and_training_files_are_identical(rel):
     train, sim = (TRAINING / rel).read_bytes(), (SIMULATOR / rel).read_bytes()
     assert train == sim, f"{rel} differs between platform/training and playground/simulator"
@@ -66,3 +66,19 @@ def test_both_environments_use_the_shared_reward_and_fall_rule():
     assert "locomotion_reward(" in sim_src and "has_fallen(" in sim_src
     for name, src in (("fleetos_env.py", train_src), ("mujoco_env.py", sim_src)):
         assert "height < 0." not in src, f"{name} hard-codes a fall threshold instead of has_fallen()"
+
+
+def test_inference_builds_the_same_observation_version():
+    import observation
+    server = REPO / "platform" / "inference" / "server.py"
+    assert _module_constant(server, "OBS_VERSION") == observation.OBS_VERSION, \
+        "inference serves a different observation version than training produces"
+
+
+def test_robots_and_test_track_share_the_episode_cap():
+    from fleetos_env import FleetOSHumanoidEnv
+    from locomotion_reward import MAX_EPISODE_STEPS
+
+    assert FleetOSHumanoidEnv()._max_episode_steps == MAX_EPISODE_STEPS
+    sim_src = (REPO / "playground" / "simulator" / "mujoco_env.py").read_text()
+    assert "MAX_EPISODE_STEPS" in sim_src, "robots must truncate episodes like the test track"

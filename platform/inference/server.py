@@ -94,6 +94,10 @@ S3_MODEL_PREFIX = os.environ.get("S3_MODEL_PREFIX", "models/humanoid-v4-ppo")
 
 # Unified observation dimension (from observation.py)
 OBS_DIM = 86
+# Observation layout version this service builds observations for. Must match
+# platform/training/observation.py OBS_VERSION (checked by test_parity.py).
+OBS_VERSION = 3
+META_FILENAME = "policy_meta.json"
 # Also accept legacy 376-dim for backward compatibility
 LEGACY_OBS_DIM = 376
 
@@ -422,6 +426,14 @@ def _download_model_from_s3(artifact_url: str = "", zip_path: str | None = None)
         except Exception as norm_err:
             log.info("[Model] No normalization stats for %s (%s) — serving raw observations",
                      s3_key, norm_err)
+        # Compatibility metadata: missing/stale means the policy is refused.
+        meta_local = str(Path(zip_path).parent / META_FILENAME)
+        if os.path.exists(meta_local):
+            os.remove(meta_local)
+        try:
+            client.fget_object(S3_BUCKET, str(Path(s3_key).parent / META_FILENAME), meta_local)
+        except Exception as meta_err:
+            log.warning("[Model] No %s for %s (%s)", META_FILENAME, s3_key, meta_err)
         return True
     except ImportError:
         log.warning("[Model] minio package not installed — cannot download from S3")
@@ -494,12 +506,32 @@ class _StubPolicy:
         return np.zeros(MUJOCO_ACTION_DIM, dtype=np.float32), None
 
 
+class IncompatiblePolicy(RuntimeError):
+    """The policy was trained on a different observation layout; never serve it."""
+
+
+def policy_incompatibility(meta_path: str) -> str | None:
+    """Why the policy whose policy_meta.json is at meta_path can't be served, or None."""
+    if not os.path.exists(meta_path):
+        return (f"no {META_FILENAME}: policy predates observation version {OBS_VERSION} "
+                "(world-frame observations); retrain it")
+    with open(meta_path) as f:
+        version = json.load(f).get("obs_version")
+    if version != OBS_VERSION:
+        return f"policy uses observation version {version}, this build uses {OBS_VERSION}; retrain it"
+    return None
+
+
 def load_policy_file(path: str):
     """Load an SB3 policy saved at `path` (with or without .zip).
 
     Locomotion policies are PPO; reach/grasp policies are SAC (+HER). The zip
-    doesn't say which, so try PPO first and fall back to SAC.
+    doesn't say which, so try PPO first and fall back to SAC. Policies trained
+    on another observation version are refused (IncompatiblePolicy).
     """
+    reason = policy_incompatibility(str(Path(path).parent / META_FILENAME))
+    if reason:
+        raise IncompatiblePolicy(f"{path}: {reason}")
     model = _load_sb3(path)
     normalize = load_obs_normalizer(normalizer_path(path))
     if normalize is not None:
@@ -591,19 +623,22 @@ def load_model(artifact_url: str = ""):
     """
     zip_path = str(MODEL_PATH) + ".zip"
 
-    # Try local cache first
-    if os.path.exists(zip_path):
-        log.info("[Model] Loading cached model from %s", zip_path)
-        model = load_policy_file(str(MODEL_PATH))
-        log.info("[Model] Model loaded successfully")
-        return model
+    try:
+        # Try local cache first
+        if os.path.exists(zip_path):
+            log.info("[Model] Loading cached model from %s", zip_path)
+            model = load_policy_file(str(MODEL_PATH))
+            log.info("[Model] Model loaded successfully")
+            return model
 
-    # Try downloading from S3
-    if _download_model_from_s3(artifact_url) and os.path.exists(zip_path):
-        log.info("[Model] Loading downloaded model from %s", zip_path)
-        model = load_policy_file(str(MODEL_PATH))
-        log.info("[Model] Model loaded successfully")
-        return model
+        # Try downloading from S3
+        if _download_model_from_s3(artifact_url) and os.path.exists(zip_path):
+            log.info("[Model] Loading downloaded model from %s", zip_path)
+            model = load_policy_file(str(MODEL_PATH))
+            log.info("[Model] Model loaded successfully")
+            return model
+    except IncompatiblePolicy as exc:
+        log.error("[Model] Refusing incompatible policy: %s", exc)
 
     # No model available — use stub that produces zero actions
     log.warning("[Model] No trained model found. Using zero-action stub.")
@@ -632,7 +667,7 @@ def mujoco_to_fleet_actions(mujoco_actions: np.ndarray) -> list[dict]:
     """Convert 25-dim MuJoCo actions to the 25-joint fleet schema (one joint per actuator)."""
     fleet_torques = np.zeros(FLEET_ACTION_DIM, dtype=np.float32)
     for mj_idx, fleet_idx in MUJOCO_TO_FLEET.items():
-        fleet_torques[fleet_idx] = np.clip(mujoco_actions[mj_idx], -1.0, 1.0)
+        fleet_torques[fleet_idx] = mujoco_actions[mj_idx]  # joint range; robots clip per actuator
 
     predicted_actions = []
     for j, joint_name in enumerate(HUMANOID_JOINTS):
@@ -809,7 +844,7 @@ def run_inference(observation: list | None, instruction: str, model_id: str, emb
         biased_action = apply_instruction_bias(raw_action, instruction)
         log.info("  [Bias] Stub policy: instruction bias applied")
     else:
-        biased_action = np.clip(raw_action, -1.0, 1.0)
+        biased_action = raw_action  # robots clip each actuator to its ctrlrange, as in training
 
     # Convert to fleet joint schema
     predicted_actions = mujoco_to_fleet_actions(biased_action)

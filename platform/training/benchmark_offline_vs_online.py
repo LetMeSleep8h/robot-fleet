@@ -66,7 +66,7 @@ def run_offline(transitions: int, gradient_steps: int) -> float:
         "--job-id", "bench", "--dataset-manifest", "-", "--batch-size", str(min(OFFLINE_BATCH, transitions)),
     ])
     model = to.make_model(args, buffer_size=transitions)
-    to.fill_replay_buffer(model.replay_buffer, data)
+    to.fill_replay_buffer(model, data)
     start = time.perf_counter()
     to.CQLTrainer(model).train_offline(gradient_steps, batch_size=args.batch_size,
                                        log_interval=max(gradient_steps, 1))

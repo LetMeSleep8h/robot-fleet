@@ -17,6 +17,7 @@ from pathlib import Path
 
 import gymnasium as gym
 import numpy as np
+from policy_meta import META_FILENAME, incompatibility, read_policy_meta
 from stable_baselines3 import PPO, SAC
 from stable_baselines3.common.vec_env import DummyVecEnv, VecNormalize
 
@@ -45,6 +46,17 @@ SCENARIO_PRESETS = {
 }
 
 
+class IncompatiblePolicy(RuntimeError):
+    """The policy was trained on a different observation layout."""
+
+
+def check_compatible(model_path: str) -> None:
+    """Refuse policies whose policy_meta.json doesn't match this build."""
+    reason = incompatibility(read_policy_meta(Path(model_path).parent / META_FILENAME))
+    if reason:
+        raise IncompatiblePolicy(f"{model_path}: {reason}")
+
+
 def download_model(args) -> str:
     """Download model from S3 to local path."""
     if args.model_path.startswith("s3://") or args.model_path.startswith("training/"):
@@ -65,12 +77,12 @@ def download_model(args) -> str:
             local_path = str(local_dir / "policy.zip")
             client.fget_object(args.s3_bucket, key, local_path)
 
-            # Also try to download normalizer
-            norm_key = key.replace("policy.zip", "vec_normalize.pkl")
-            try:
-                client.fget_object(args.s3_bucket, norm_key, str(local_dir / "vec_normalize.pkl"))
-            except Exception:
-                pass
+            # Optional siblings: normalizer (PPO) and compatibility metadata
+            for sibling in ("vec_normalize.pkl", META_FILENAME):
+                try:
+                    client.fget_object(args.s3_bucket, key.replace("policy.zip", sibling), str(local_dir / sibling))
+                except Exception:  # noqa: BLE001 — absent siblings are handled by the caller
+                    pass
 
             print(f"[eval] Downloaded model from {key}")
             return local_path
@@ -89,6 +101,7 @@ def evaluate(args):
     print(f"[eval] Scenarios: {args.scenarios}")
 
     model_path = download_model(args)
+    check_compatible(model_path)
     model, algorithm = load_policy(model_path)
     print(f"[eval] Loaded {algorithm} policy")
 
@@ -164,7 +177,8 @@ def evaluate(args):
 
 
 def run_scenario(model, env, scenario_id: str, preset_name: str, config: dict) -> dict:
-    """Run a single evaluation scenario."""
+    """Run a single evaluation scenario under its preset's physics."""
+    env.env_method("set_conditions", **config)
     obs = env.reset()
     total_reward = 0.0
     steps = 0

@@ -1,5 +1,6 @@
 """Tests for inference server: joint mapping, per-artifact policy cache, fallback."""
 
+import json
 import sys
 import threading
 import types
@@ -214,28 +215,35 @@ def fake_sb3(monkeypatch):
     return sb3
 
 
-def test_load_policy_file_prefers_ppo(fake_sb3):
+@pytest.fixture
+def compatible_dir(tmp_path):
+    """A model directory shipped the way trainers ship it (with policy_meta.json)."""
+    (tmp_path / server.META_FILENAME).write_text(json.dumps({"obs_version": server.OBS_VERSION}))
+    return tmp_path
+
+
+def test_load_policy_file_prefers_ppo(fake_sb3, compatible_dir):
     ppo_model = object()
     fake_sb3.PPO.load.return_value = ppo_model
-    assert server.load_policy_file("/tmp/x/policy") is ppo_model
+    assert server.load_policy_file(str(compatible_dir / "policy")) is ppo_model
     fake_sb3.SAC.load.assert_not_called()
 
 
-def test_load_policy_file_falls_back_to_sac(fake_sb3):
+def test_load_policy_file_falls_back_to_sac(fake_sb3, compatible_dir):
     sac_model = object()
     fake_sb3.PPO.load.side_effect = ValueError("not ppo")
     fake_sb3.SAC.load.return_value = sac_model
-    assert server.load_policy_file("/tmp/x/policy") is sac_model
+    assert server.load_policy_file(str(compatible_dir / "policy")) is sac_model
     # HER policies need the replay buffer swapped to load without an env.
     custom = fake_sb3.SAC.load.call_args.kwargs["custom_objects"]
     assert custom["replay_buffer_class"] is sys.modules["stable_baselines3.common.buffers"].DictReplayBuffer
 
 
-def test_load_policy_file_raises_when_neither_loads(fake_sb3):
+def test_load_policy_file_raises_when_neither_loads(fake_sb3, compatible_dir):
     fake_sb3.PPO.load.side_effect = ValueError("a")
     fake_sb3.SAC.load.side_effect = ValueError("b")
     with pytest.raises(RuntimeError):
-        server.load_policy_file("/tmp/x/policy")
+        server.load_policy_file(str(compatible_dir / "policy"))
 
 
 def test_artifact_cache_path_is_per_artifact_and_not_model_path():
@@ -279,7 +287,8 @@ def test_load_obs_normalizer_missing_file_is_none(tmp_path):
     assert server.load_obs_normalizer(str(tmp_path / "nope.pkl")) is None
 
 
-def test_load_policy_file_wraps_with_sibling_normalizer(fake_sb3, tmp_path):
+def test_load_policy_file_wraps_with_sibling_normalizer(fake_sb3, compatible_dir):
+    tmp_path = compatible_dir
     seen = {}
 
     class Recording:
@@ -297,7 +306,8 @@ def test_load_policy_file_wraps_with_sibling_normalizer(fake_sb3, tmp_path):
     assert seen["obs"] == pytest.approx([1.0, 2.0], rel=1e-5)
 
 
-def test_load_policy_file_without_normalizer_is_unwrapped(fake_sb3, tmp_path):
+def test_load_policy_file_without_normalizer_is_unwrapped(fake_sb3, compatible_dir):
+    tmp_path = compatible_dir
     model = object()
     fake_sb3.PPO.load.return_value = model
     assert server.load_policy_file(str(tmp_path / "policy")) is model
@@ -318,6 +328,15 @@ def test_learned_policy_actions_are_not_biased(active_model):
     assert result["action"] == pytest.approx([0.0] * server.MUJOCO_ACTION_DIM)
 
 
+def test_learned_policy_actions_keep_their_joint_range(active_model, monkeypatch):
+    # Policies act in each actuator's ctrlrange (knee to -2.8 rad); robots clip
+    # to that range in physics, so serving must not cut targets to [-1, 1].
+    monkeypatch.setattr(server, "_policy", FakePolicy(-2.5))
+    result = server.run_inference(None, "walk", "", "humanoid-v4")
+    assert result["action"] == pytest.approx([-2.5] * server.MUJOCO_ACTION_DIM)
+    assert {a["torque"] for a in result["predicted_actions"]} == {-2.5}
+
+
 def test_stub_policy_actions_are_biased(active_model, monkeypatch):
     monkeypatch.setattr(server, "_policy", server._StubPolicy())
     result = server.run_inference(None, "wave hello", "", "humanoid-v4")
@@ -336,3 +355,23 @@ def test_inference_predicts_deterministically_like_evaluation(active_model, monk
     monkeypatch.setattr(server, "_policy", Recording(0.1))
     server.run_inference(None, "walk", "", "humanoid-v4")
     assert calls == [True]
+
+
+# ─── Observation-version compatibility ──────────────────────────
+
+def test_load_policy_file_refuses_policy_without_meta(fake_sb3, tmp_path):
+    with pytest.raises(server.IncompatiblePolicy, match="policy_meta.json"):
+        server.load_policy_file(str(tmp_path / "policy"))
+    fake_sb3.PPO.load.assert_not_called()
+
+
+def test_load_policy_file_refuses_other_obs_version(fake_sb3, tmp_path):
+    (tmp_path / server.META_FILENAME).write_text('{"obs_version": 2}')
+    with pytest.raises(server.IncompatiblePolicy, match="version 2"):
+        server.load_policy_file(str(tmp_path / "policy"))
+
+
+def test_load_model_serves_stub_for_incompatible_policy(fake_sb3, tmp_path, monkeypatch):
+    monkeypatch.setattr(server, "MODEL_PATH", tmp_path / "humanoid-v4-ppo")
+    (tmp_path / "humanoid-v4-ppo.zip").write_bytes(b"zip")  # cached model, no policy_meta.json
+    assert isinstance(server.load_model(), server._StubPolicy)

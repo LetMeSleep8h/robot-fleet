@@ -204,7 +204,7 @@ def main():
                 task_commands[rid] = task.current_task
 
                 rec = recorders.setdefault(rid, TransitionRecorder(rid))
-                episodes_before[rid] = robot["episode_count"]
+                episodes_before[rid] = (robot["fall_count"], robot["truncation_count"])
                 records[rid] = rec.before_step(
                     obs, applied, explored, robot["cum_reward"], record=record_tick)
 
@@ -217,8 +217,10 @@ def main():
                 robot = sim._find_robot(rid)
                 if not robot or rid not in recorders:
                     continue
-                fell = robot["episode_count"] != episodes_before.get(rid, robot["episode_count"])
-                terminal = recorders[rid].after_step(robot["cum_reward"], fell=fell)
+                falls, truncations = episodes_before.get(rid, (robot["fall_count"], robot["truncation_count"]))
+                terminal = recorders[rid].after_step(robot["cum_reward"],
+                                                     fell=robot["fall_count"] != falls,
+                                                     truncated=robot["truncation_count"] != truncations)
                 # Telemetry goes out on record ticks, and immediately on a fall
                 # so the terminal transition is not lost.
                 if not (record_tick or terminal):

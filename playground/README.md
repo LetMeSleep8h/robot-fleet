@@ -134,7 +134,7 @@ Simulator (50 Hz control loop, 10 Hz telemetry)
   │
   gRPC telemetry → Ingestion → Kafka → Processor
   │
-  S3: fleetos-telemetry/training_data/v2/{YYYY/MM/DD/HH}/{robot_id}/transitions_{ns}.ndjson
+  S3: fleetos-telemetry/training_data/v3/{YYYY/MM/DD/HH}/{robot_id}/transitions_{ns}.ndjson
 ```
 
 A deterministic fraction of robots (`EXPLORATION_FRACTION`, default 0.2) adds Gaussian noise (`EXPLORATION_STD`, default 0.1) to their actions so the data isn't limited to what the current policy already does. The platform pipeline (`POST /api/v1/training/pipelines`) snapshots these batches and trains offline (CQL); MuJoCo is only used to evaluate the result.

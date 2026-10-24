@@ -28,6 +28,7 @@ from pathlib import Path
 
 import gymnasium as gym
 import numpy as np
+from policy_meta import write_policy_meta
 from stable_baselines3 import SAC
 from stable_baselines3.common.callbacks import BaseCallback
 from stable_baselines3.common.vec_env import DummyVecEnv
@@ -134,6 +135,7 @@ def train(args):
     # Save
     model_path = str(output_dir / "policy")
     model.save(model_path)
+    write_policy_meta(output_dir)  # obs version, checked before execution
 
     # Evaluate
     success_count = 0
