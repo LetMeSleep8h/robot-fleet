@@ -59,6 +59,23 @@ class FleetOSHumanoidEnv(gym.Env):
 
         self._prev_x = 0.0
 
+        # Scenario conditions (evaluate_policy.SCENARIO_PRESETS); scene defaults until set.
+        self._torso_id = self.model.body("torso").id
+        self._base_sliding_friction = self.model.geom_friction[:, 0].copy()
+        self._wind = 0.0
+
+    def set_conditions(self, gravity: float, friction: float, wind: float):
+        """Physics for a test-track scenario, kept across resets.
+
+        gravity: vertical acceleration (m/s², negative is down).
+        friction: multiplier on every geom's sliding friction from the scene.
+        wind: constant lateral force on the torso (N, +y: a side gust).
+        """
+        self.model.opt.gravity[:] = (0.0, 0.0, gravity)
+        self.model.geom_friction[:, 0] = self._base_sliding_friction * friction
+        self._wind = wind
+        self.data.xfrc_applied[self._torso_id, :3] = (0.0, wind, 0.0)
+
     def _get_obs(self) -> np.ndarray:
         """Build unified 86-dim observation from MuJoCo state."""
         return build_observation_from_mujoco(
@@ -80,6 +97,9 @@ class FleetOSHumanoidEnv(gym.Env):
         joint_end = joint_start + NUM_ACTUATORS
         noise = self.np_random.uniform(-0.01, 0.01, size=NUM_ACTUATORS)
         self.data.qpos[joint_start:joint_end] += noise
+
+        # mj_resetData clears applied forces; wind persists across episodes.
+        self.data.xfrc_applied[self._torso_id, :3] = (0.0, self._wind, 0.0)
 
         mujoco.mj_forward(self.model, self.data)
 

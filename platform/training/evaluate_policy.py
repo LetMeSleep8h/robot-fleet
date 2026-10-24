@@ -177,7 +177,8 @@ def evaluate(args):
 
 
 def run_scenario(model, env, scenario_id: str, preset_name: str, config: dict) -> dict:
-    """Run a single evaluation scenario."""
+    """Run a single evaluation scenario under its preset's physics."""
+    env.env_method("set_conditions", **config)
     obs = env.reset()
     total_reward = 0.0
     steps = 0
