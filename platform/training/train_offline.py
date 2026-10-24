@@ -30,6 +30,7 @@ from pathlib import Path
 
 import gymnasium as gym
 import numpy as np
+from policy_meta import write_policy_meta
 import torch
 import torch.nn.functional as F
 from stable_baselines3 import SAC
@@ -325,6 +326,7 @@ def run(args) -> int:
     )
     duration = time.time() - start
     model.save(str(output_dir / "policy"))
+    write_policy_meta(output_dir)  # obs version, checked before execution
 
     results = {
         **base,

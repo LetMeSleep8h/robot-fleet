@@ -31,6 +31,8 @@ from typing import Callable, Optional
 
 import numpy as np
 
+from policy_meta import META_FILENAME, incompatibility, read_policy_meta
+
 log = logging.getLogger(__name__)
 
 OBS_DIM = 86
@@ -93,8 +95,20 @@ class NormalizedPolicy:
         return self._policy.predict(self._normalize(obs), deterministic=deterministic)
 
 
+class IncompatiblePolicy(RuntimeError):
+    """The policy was trained on a different observation layout; never execute it."""
+
+
 def load_policy_file(policy_path: str):
-    """Load an SB3 policy (PPO, then SAC, then TQC) + its normalizer if present."""
+    """Load an SB3 policy (PPO, then SAC, then TQC) + its normalizer if present.
+
+    Refuses policies whose policy_meta.json doesn't match this build's
+    observation version (the robot then stays on cloud inference).
+    """
+    reason = incompatibility(read_policy_meta(Path(policy_path).parent / META_FILENAME))
+    if reason:
+        raise IncompatiblePolicy(f"{policy_path}: {reason}")
+
     from stable_baselines3 import PPO, SAC
 
     loaders = [PPO.load, SAC.load]
@@ -135,6 +149,11 @@ def make_s3_fetch_and_load(endpoint: str, access_key: str, secret_key: str,
                 client.fget_object(bucket, normalizer_key(artifact_url), str(local_dir / NORMALIZER_FILE))
             except Exception as exc:  # optional: offline models have no normalizer
                 log.info("no normalizer for %s (%s): raw observations", artifact_url, exc)
+            try:
+                meta_key = s3_key(artifact_url).replace("policy.zip", META_FILENAME)
+                client.fget_object(bucket, meta_key, str(local_dir / META_FILENAME))
+            except Exception as exc:  # missing metadata is refused by load_policy_file
+                log.warning("no %s for %s (%s)", META_FILENAME, artifact_url, exc)
         return load_policy_file(str(local_dir / "policy"))
 
     return fetch_and_load

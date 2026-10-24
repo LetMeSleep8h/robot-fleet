@@ -51,7 +51,7 @@ FleetOS uses a **cloud-brain** architecture — all reasoning on the platform, r
 │                                                    │
 │  Ingestion → Kafka → Processor                     │
 │                        ├─ S3 raw archive           │
-│                        ├─ S3 training_data/v2/     │
+│                        ├─ S3 training_data/v3/     │
 │                        ├─ Redis hot state          │
 │                        └─ Postgres cold metadata   │
 │                                                    │
@@ -102,11 +102,13 @@ FleetOS uses a **cloud-brain** architecture — all reasoning on the platform, r
 | Source | Rate | Format | Storage | Key file |
 |--------|------|--------|---------|----------|
 | Telemetry | 10 Hz per robot | Protobuf → JSON | S3 `telemetry/{date}/{hour}/{robot_id}/` | `playground/simulator/telemetry_client.py` |
-| Fleet experience (v2) | 10 Hz per robot (+ terminal record on each fall) | NDJSON `{obs (86), action (25), reward, episode_done, episode_id, step, exploration, …}` | S3 `fleetos-telemetry/training_data/v2/{YYYY/MM/DD/HH}/{robot_id}/` (100 per batch) | simulator `main.py` / `transitions.py` → `platform/internal/experience/` (processor) |
+| Fleet experience (v3) | 10 Hz per robot (+ terminal record on each fall) | NDJSON `{obs (86), action (25), reward, episode_done, episode_id, step, exploration, …}` | S3 `fleetos-telemetry/training_data/v3/{YYYY/MM/DD/HH}/{robot_id}/` (100 per batch) | simulator `main.py` / `transitions.py` → `platform/internal/experience/` (processor) |
 | Robot hot state | 10 Hz | JSON | Redis `robot:state:{robot_id}` (5 min TTL) | `platform/cmd/processor/main.go` |
 | Robot cold metadata | ~0.2 Hz (every 50th packet) | SQL row | Postgres `robots` table | `platform/internal/store/postgres.go` |
 | Episodes | Daily batch | JSON | S3 `episodes/{date}/{robot_id}/` | `platform/analytics/episode_extractor.py` |
 | Fleet analytics | Hourly batch | JSON + ClickHouse | S3 + `robot_telemetry_hourly` | `platform/analytics/telemetry_analytics.py` |
+
+Observations are **egocentric** (observation version 3): joint state, torso orientation without yaw, velocities in the heading/body frame, and hand/object positions relative to the torso in the heading frame. Version 2 used world-frame hand/object positions, so a policy only behaved like on the test track when the robot stood at the origin with objects in their start spots — fleet robots don't. v2 experience (`training_data/v2/`) and v2 policies are not readable by v3 code: the experience prefix moved to `training_data/v3/`, and every policy now ships `policy_meta.json` with its `obs_version`; robots, inference and evaluation refuse mismatches instead of executing them.
 
 #### Observation space (86 dims — unified format)
 
@@ -132,7 +134,7 @@ Single source of truth: `platform/training/observation.py`. Used by all environm
 
 ```
 Simulator (50 Hz) → gRPC Telemetry (+ training context) → Ingestion → Kafka → Processor
-                                                           ├─ S3 training_data/v2/ (fleet experience)
+                                                           ├─ S3 training_data/v3/ (fleet experience)
                                                            ├─ S3 raw archive
                                                            ├─ Redis (real-time)
                                                            └─ Postgres (metadata)
@@ -172,7 +174,7 @@ Simulator (50 Hz) → gRPC Telemetry (+ training context) → Ingestion → Kafk
 
 | Paradigm | Scripts | Data Source | When to Use |
 |----------|---------|-------------|-------------|
-| **Offline RL** (pipeline) | `train_offline.py` | Fleet experience (`training_data/v2/`) | Default — learn from what robots actually did |
+| **Offline RL** (pipeline) | `train_offline.py` | Fleet experience (`training_data/v3/`) | Default — learn from what robots actually did |
 | **Online RL** (manual) | `train_locomotion.py`, `train_reach.py`, `train_grasp.py` | Simulator interaction | Bootstrapping a first policy that produces useful fleet data |
 | **Supervised (BC)** | `train_bc.py` | Filtered experience or expert rollouts | Pre-training before RL fine-tuning for faster convergence |
 | **Unsupervised** | `train_autoencoder.py` | S3 observations only | Anomaly detection, representation learning |
@@ -270,7 +272,7 @@ This stage is the least covered. It focuses on understanding *why* the policy be
 
 - **SAC+HER for reaching** — goal-conditioned reaching with sparse rewards and hindsight relabeling
 - **SAC+HER for grasping** — goal-conditioned grasp+lift environment with scripted demo generation
-- **Offline training from fleet experience** — the pipeline trains CQL-SAC on pinned snapshots of real fleet data (`training_data/v2/`), no simulator in training; MuJoCo is the evaluation test track; models record their dataset manifest
+- **Offline training from fleet experience** — the pipeline trains CQL-SAC on pinned snapshots of real fleet data (`training_data/v3/`), no simulator in training; MuJoCo is the evaluation test track; models record their dataset manifest
 - **Behavior cloning** — supervised pre-training on (obs, action) pairs, SB3-compatible output for fine-tuning
 - **Autoencoder** — unsupervised 86→32-dim representation learning on observation vectors
 - **Unified 86-dim observation** — single format across all tasks and training scripts

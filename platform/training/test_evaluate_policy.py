@@ -46,3 +46,13 @@ def test_real_offline_policy_round_trip(tmp_path):
     assert algo == "SAC"
     action, _ = loaded.predict(np.zeros(to.OBS_DIM, dtype=np.float32), deterministic=True)
     assert action.shape == (to.ACT_DIM,)
+
+
+def test_refuses_policies_without_matching_obs_version(tmp_path):
+    import policy_meta as pm
+    model = tmp_path / "policy.zip"
+    model.write_bytes(b"zip")
+    with pytest.raises(ep.IncompatiblePolicy, match="policy_meta.json"):
+        ep.check_compatible(str(model))
+    pm.write_policy_meta(tmp_path)
+    ep.check_compatible(str(model))  # compatible: no exception

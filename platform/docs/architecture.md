@@ -59,7 +59,7 @@ graph TD
     subgraph Storage["Storage Layer"]
         PG[("PostgreSQL 16 (RDS)<br/>Multi-AZ, encrypted<br/>robots, models, commands,<br/>tenants, invoices, api_keys")]
         REDIS[("Redis 7 (ElastiCache)<br/>Sentinel failover<br/>hot state 5min TTL,<br/>rate limits, pub/sub")]
-        S3_TEL["S3: fleetos-telemetry<br/>NDJSON + video + lidar + audio<br/>training_data/v2/ fleet experience<br/>→ Glacier 90d → Delete 365d"]
+        S3_TEL["S3: fleetos-telemetry<br/>NDJSON + video + lidar + audio<br/>training_data/v3/ fleet experience<br/>→ Glacier 90d → Delete 365d"]
         S3_MOD["S3: fleetos-models<br/>CQL/PPO/SAC policies, dataset manifests,<br/>eval results; versioned"]
         S3_TRAIN["S3: fleetos-training-data<br/>(Terraform; unused locally —<br/>fleet experience is in fleetos-telemetry)<br/>→ Glacier 30d → Delete 180d"]
         CH[("ClickHouse<br/>OLAP analytics<br/>(optional, graceful fallback)")]
@@ -333,7 +333,7 @@ graph TD
 ```mermaid
 graph TD
     TRIGGER["Trigger<br/>(POST /api/v1/training/pipelines;<br/>success_rate monitor not started yet)"] --> TEMP["Temporal<br/>TrainingPipelineWorkflow"]
-    FLEET["S3: training_data/v2/<br/>fleet experience"] --> SNAP["SnapshotDataset<br/>datasets/job-id/manifest.json"]
+    FLEET["S3: training_data/v3/<br/>fleet experience"] --> SNAP["SnapshotDataset<br/>datasets/job-id/manifest.json"]
     TEMP --> SNAP
     SNAP -->|"too little data"| NODATA["phase=insufficient_data"]
     SNAP -->|"use_katib"| HPO["RunHyperparameterSearch<br/>Katib Experiment (TPE),<br/>offline trials + test-track score"]

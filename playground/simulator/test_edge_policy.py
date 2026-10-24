@@ -251,6 +251,8 @@ def test_load_policy_file_real_ppo_with_vecnormalize(tmp_path):
     model = sb3.PPO("MlpPolicy", venv, n_steps=8, batch_size=8)
     model.save(tmp_path / "policy")
     venv.save(str(tmp_path / ep.NORMALIZER_FILE))
+    import policy_meta
+    policy_meta.write_policy_meta(tmp_path)  # trainers ship this next to policy.zip
 
     policy = ep.load_policy_file(str(tmp_path / "policy"))
     assert isinstance(policy, ep.NormalizedPolicy)
@@ -285,3 +287,14 @@ def test_normalize_obs_equals_sb3_vecnormalize():
 
     ours = ep.normalize_obs(obs, vec.obs_rms.mean, vec.obs_rms.var, vec.clip_obs, vec.epsilon)
     assert ours == pytest.approx(vec.normalize_obs(obs), rel=1e-5, abs=1e-6)
+
+
+def test_load_refuses_policy_without_matching_obs_version(tmp_path):
+    import policy_meta as pm
+    (tmp_path / "policy.zip").write_bytes(b"not a real zip")
+    with pytest.raises(ep.IncompatiblePolicy, match="policy_meta.json"):
+        ep.load_policy_file(str(tmp_path / "policy.zip"))
+
+    (tmp_path / pm.META_FILENAME).write_text('{"obs_version": 2}')
+    with pytest.raises(ep.IncompatiblePolicy, match="version 2"):
+        ep.load_policy_file(str(tmp_path / "policy.zip"))
