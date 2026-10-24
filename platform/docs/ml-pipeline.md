@@ -19,7 +19,7 @@ Problem Framing → High-Level Design → Data & Features → Modelling → Infe
 | Observation | 86-dim unified vector: joint pos/vel (50), root quat/vel (10), hand positions (6), grippers (4), objects (12), task encoding (4) |
 | Action | 25-dim position targets (joint angles in radians, PD-controlled) |
 | Reward | `forward_velocity + 1.0 − 0.1 * control_cost` (locomotion); sparse -1/0 for HER (reach, grasp) |
-| Termination | Height < 0.3 m (fallen) |
+| Termination | Torso height < 1.0 m (fallen; a crouch counts — at 0.3 m PPO learned to crawl at 0.57 m instead of balancing) |
 | Episode length | Max 1000 steps |
 | Physics | 0.003 s timestep, 7 substeps per control tick, RK4 integrator |
 

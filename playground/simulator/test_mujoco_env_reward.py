@@ -24,11 +24,11 @@ def test_first_walk_step_after_spawn_has_no_reward_spike():
         assert abs(r["cum_reward"] - before[r["id"]]) < WALK_STEP_REWARD_BOUND
 
 
-def test_walk_reward_matches_training_between_old_and_new_fall_threshold():
-    # Training only penalises below FALL_Z (0.3); a walking robot at 0.35 is upright.
+def test_crouching_robot_is_penalised_like_training():
+    # Training (locomotion_reward.FALL_Z) treats a crouched torso as a fall; robots must too.
     sim = LabSimulation()
     robot = sim.robots[0]
     robot["prev_x"] = float(sim.data.qpos[robot["qpos_start"]])
-    reward = sim._compute_reward(robot, "walk", height=0.35, x_pos=robot["prev_x"],
+    reward = sim._compute_reward(robot, "walk", height=0.57, x_pos=robot["prev_x"],
                                  dt=0.021, ctrl_cost=0.0)
-    assert reward != -10.0, "simulator penalises a robot the training env considers upright"
+    assert reward == -10.0, "simulator rewards a crouch the training env counts as a fall"
