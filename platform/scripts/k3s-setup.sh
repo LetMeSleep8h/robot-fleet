@@ -17,6 +17,9 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PLATFORM_DIR="$(dirname "$SCRIPT_DIR")"
 K8S_DIR="$PLATFORM_DIR/deploy/k8s"
 HELM_DIR="$PLATFORM_DIR/deploy/helm/fleetos"
+# Every kubectl/helm call targets this context explicitly; the user's current
+# context (possibly a production cluster) is never used or changed.
+KUBE_CONTEXT="${KUBE_CONTEXT:-colima}"
 RELEASE="${RELEASE:-fleetos-platform}"
 NAMESPACE="${NAMESPACE:-fleetos}"
 K3S_CPUS="${K3S_CPUS:-8}"
@@ -42,6 +45,9 @@ log()  { echo -e "${GREEN}[k3s]${NC} $*"; }
 warn() { echo -e "${YELLOW}[k3s]${NC} $*"; }
 err()  { echo -e "${RED}[k3s]${NC} $*" >&2; }
 step() { echo -e "\n${CYAN}--- $* ---${NC}"; }
+
+kubectl() { command kubectl --context "$KUBE_CONTEXT" "$@"; }
+helm() { command helm --kube-context "$KUBE_CONTEXT" "$@"; }
 
 # --- Preflight ---
 preflight() {
@@ -75,13 +81,12 @@ start_cluster() {
     step "Colima + k3s"
     local status
     status=$(colima list -j 2>/dev/null | head -1 || true)
-    if echo "$status" | grep -q '"status":"Running"' && kubectl --context colima get nodes >/dev/null 2>&1; then
+    if echo "$status" | grep -q '"status":"Running"' && kubectl get nodes >/dev/null 2>&1; then
         log "Colima is running with k3s"
     else
         log "Starting Colima (cpu=${K3S_CPUS}, memory=${K3S_MEMORY}GiB) with k3s..."
         colima start --kubernetes --cpu "$K3S_CPUS" --memory "$K3S_MEMORY" --network-address
     fi
-    kubectl config use-context colima >/dev/null
     kubectl wait --for=condition=Ready node --all --timeout=180s
 }
 
@@ -181,13 +186,13 @@ print_summary() {
     ip=$(vm_ip)
     ip="${ip:-<colima-vm-ip>}"
     step "FleetOS on k3s ready"
-    log "  Context:       colima"
+    log "  Context:       ${KUBE_CONTEXT} (pass --context ${KUBE_CONTEXT}; your current context is unchanged)"
     log "  API:           http://${ip}:30880   (X-API-Key: dev-key-001)"
     log "  Inference:     http://${ip}:30081"
     log "  Argo Wf UI:    https://${ip}:30746"
     log "  MinIO Console: http://${ip}:30901   (fleetos / fleetos123)"
     if [ "$K3S_KUBEFLOW" = "true" ]; then
-        log "  Katib UI:      kubectl -n kubeflow port-forward svc/katib-ui 8090:80  → http://localhost:8090/katib/"
+        log "  Katib UI:      kubectl --context ${KUBE_CONTEXT} -n kubeflow port-forward svc/katib-ui 8090:80  → http://localhost:8090/katib/"
     fi
     echo ""
     log "  Pipeline (Katib HPO → Kubeflow TrainJob → eval → gate):"
