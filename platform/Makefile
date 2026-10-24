@@ -99,6 +99,10 @@ db-migrate:
 
 # --- Kubernetes (local kind + ArgoCD + Argo Workflows) ---
 K8S_CLUSTER ?= fleetos
+# Every kubectl call names its cluster: the current context on a dev machine
+# may be a production cluster. k3s-* targets override this to colima.
+KUBE_CONTEXT ?= kind-$(K8S_CLUSTER)
+KUBECTL = kubectl --context $(KUBE_CONTEXT)
 TASK ?= reach
 TIMESTEPS ?= 100000
 JOB_ID ?= $(TASK)-$(shell date +%s)
@@ -115,7 +119,7 @@ k8s-down:
 k8s-reload:
 	docker build -t fleetos/$(SVC):latest -f deploy/docker/Dockerfile.$(SVC) .
 	kind load docker-image fleetos/$(SVC):latest --name $(K8S_CLUSTER)
-	kubectl rollout restart deployment/fleetos-$(SVC) -n fleetos
+	$(KUBECTL) rollout restart deployment/fleetos-$(SVC) -n fleetos
 
 # Rebuild and reload images only (no cluster recreate)
 k8s-images:
@@ -123,7 +127,7 @@ k8s-images:
 
 # Force ArgoCD to re-sync the Helm release
 k8s-sync:
-	kubectl -n argocd patch application fleetos-platform --type merge \
+	$(KUBECTL) -n argocd patch application fleetos-platform --type merge \
 		-p '{"operation":{"initiatedBy":{"username":"cli"},"sync":{"revision":"HEAD"}}}'
 
 k8s-training-image:
@@ -149,7 +153,7 @@ k8s-train:
 		'        value: "$(JOB_ID)"' \
 		'      - name: timesteps' \
 		'        value: "$(TIMESTEPS)"' \
-		| kubectl create -n argo -f -
+		| $(KUBECTL) create -n argo -f -
 
 # --- Kubernetes (single-node k3s in Colima — MLOps path, no ArgoCD) ---
 k3s-up:
@@ -163,27 +167,28 @@ k3s-images:
 k3s-down:
 	colima stop
 
+k3s-train: KUBE_CONTEXT = colima
 k3s-train: k8s-train
 
 k8s-status:
-	@echo "=== Namespaces ===" && kubectl get ns
+	@echo "=== Namespaces ===" && $(KUBECTL) get ns
 	@echo ""
-	@echo "=== FleetOS Pods ===" && kubectl get pods -n fleetos -o wide 2>/dev/null || true
+	@echo "=== FleetOS Pods ===" && $(KUBECTL) get pods -n fleetos -o wide 2>/dev/null || true
 	@echo ""
-	@echo "=== FleetOS Services ===" && kubectl get svc -n fleetos 2>/dev/null || true
+	@echo "=== FleetOS Services ===" && $(KUBECTL) get svc -n fleetos 2>/dev/null || true
 	@echo ""
-	@echo "=== ArgoCD ===" && kubectl get pods -n argocd 2>/dev/null || true
+	@echo "=== ArgoCD ===" && $(KUBECTL) get pods -n argocd 2>/dev/null || true
 	@echo ""
-	@echo "=== Argo Workflows ===" && kubectl get workflows -n argo 2>/dev/null || true
+	@echo "=== Argo Workflows ===" && $(KUBECTL) get workflows -n argo 2>/dev/null || true
 
 k8s-logs:
-	kubectl logs -n fleetos deployment/fleetos-$(SVC) --tail=100 -f
+	$(KUBECTL) logs -n fleetos deployment/fleetos-$(SVC) --tail=100 -f
 
 k8s-restart:
-	kubectl rollout restart deployment/fleetos-$(SVC) -n fleetos
+	$(KUBECTL) rollout restart deployment/fleetos-$(SVC) -n fleetos
 
 k8s-argocd-password:
-	@kubectl -n argocd get secret argocd-initial-admin-secret -o jsonpath="{.data.password}" | base64 -d && echo
+	@$(KUBECTL) -n argocd get secret argocd-initial-admin-secret -o jsonpath="{.data.password}" | base64 -d && echo
 
 # --- Clean ---
 clean:
